@@ -1,0 +1,179 @@
+{
+  "name": "neocode-vscode",
+  "displayName": "Neocode",
+  "description": "Practical VS Code companion for Neocode with project-aware launch behavior and a real Control Center.",
+  "version": "0.2.0",
+  "publisher": "devnull-bootloader",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Themes",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:neocode.start",
+    "onCommand:neocode.startInWorkspaceRoot",
+    "onCommand:neocode.openDocs",
+    "onCommand:neocode.openSetupDocs",
+    "onCommand:neocode.openWorkspaceProfile",
+    "onCommand:neocode.openControlCenter",
+    "onCommand:neocode.newChat",
+    "onCommand:neocode.openChat",
+    "onCommand:neocode.resumeSession",
+    "onCommand:neocode.abortChat",
+    "onView:neocode.controlCenter",
+    "onView:neocode.chat"
+  ],
+  "main": "./src/extension.js",
+  "files": [
+    "README.md",
+    "media/**",
+    "src/extension.js",
+    "src/presentation.js",
+    "src/state.js",
+    "src/chat/**",
+    "themes/**"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "neocode.start",
+        "title": "Neocode: Launch in Terminal",
+        "category": "Neocode"
+      },
+      {
+        "command": "neocode.startInWorkspaceRoot",
+        "title": "Neocode: Launch in Workspace Root",
+        "category": "Neocode"
+      },
+      {
+        "command": "neocode.openDocs",
+        "title": "Neocode: Open Repository",
+        "category": "Neocode"
+      },
+      {
+        "command": "neocode.openSetupDocs",
+        "title": "Neocode: Open Setup Guide",
+        "category": "Neocode"
+      },
+      {
+        "command": "neocode.openWorkspaceProfile",
+        "title": "Neocode: Open Workspace Profile",
+        "category": "Neocode"
+      },
+      {
+        "command": "neocode.openControlCenter",
+        "title": "Neocode: Open Control Center",
+        "category": "Neocode"
+      },
+      {
+        "command": "neocode.newChat",
+        "title": "Neocode: New Chat",
+        "category": "Neocode"
+      },
+      {
+        "command": "neocode.openChat",
+        "title": "Neocode: Open Chat Panel",
+        "category": "Neocode"
+      },
+      {
+        "command": "neocode.resumeSession",
+        "title": "Neocode: Resume Session",
+        "category": "Neocode"
+      },
+      {
+        "command": "neocode.abortChat",
+        "title": "Neocode: Abort Generation",
+        "category": "Neocode"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "neocode",
+          "title": "Neocode",
+          "icon": "media/neocode.svg"
+        }
+      ]
+    },
+    "views": {
+      "neocode": [
+        {
+          "id": "neocode.chat",
+          "name": "Chat",
+          "type": "webview"
+        },
+        {
+          "id": "neocode.controlCenter",
+          "name": "Control Center",
+          "type": "webview"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "neocode.openChat",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l"
+      }
+    ],
+    "configuration": {
+      "title": "Neocode",
+      "properties": {
+        "neocode.launchCommand": {
+          "type": "string",
+          "default": "neocode",
+          "description": "Command run in the integrated terminal when launching Neocode."
+        },
+        "neocode.terminalName": {
+          "type": "string",
+          "default": "Neocode",
+          "description": "Integrated terminal tab name for Neocode sessions."
+        },
+        "neocode.useOpenAIShim": {
+          "type": "boolean",
+          "default": false,
+          "description": "Optionally set CLAUDE_CODE_USE_OPENAI=1 in launched Neocode terminals."
+        },
+        "neocode.permissionMode": {
+          "type": "string",
+          "default": "acceptEdits",
+          "enum": ["default", "acceptEdits", "bypassPermissions", "plan"],
+          "enumDescriptions": [
+            "Prompt for permission on each tool use (requires manual approval)",
+            "Auto-approve file edits, prompt for other operations (recommended)",
+            "Auto-approve all operations without prompting",
+            "Read-only mode — no file modifications allowed"
+          ],
+          "description": "Permission mode for chat sessions. Controls which tool operations are auto-approved."
+        }
+      }
+    },
+    "themes": [
+      {
+        "label": "Neocode Terminal Black",
+        "uiTheme": "vs-dark",
+        "path": "./themes/Neocode-Terminal-Black.json"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "bun test src",
+    "lint": "node scripts/lint.js",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "keywords": [
+    "neocode",
+    "terminal",
+    "theme",
+    "cli",
+    "llm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Panagiotis3149/neocode"
+  },
+  "license": "MIT"
+}

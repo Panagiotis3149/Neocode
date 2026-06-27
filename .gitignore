@@ -1,0 +1,24 @@
+node_modules/
+dist/
+*.tsbuildinfo
+web/dist/
+web/*.tsbuildinfo
+.env
+.env.*
+!.env.example
+auth.json
+.neocode-profile.json
+.neocode/
+reports/
+GEMINI.md
+CLAUDE.md
+package-lock.json
+/.claude
+coverage/
+agent.log
+plan/
+temp_reference/
+bash.exe.stackdump
+# Personal Windows launchers (install scripts ship without --resume)
+"run-neocode (Resume).bat"
+"build-and-run-neocode (Resume).bat"
