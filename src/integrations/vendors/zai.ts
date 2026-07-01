@@ -18,7 +18,7 @@ export default defineVendor({
       preserveReasoningContent: true,
       requireReasoningContentOnAssistantMessages: true,
       reasoningContentFallback: '',
-      thinkingRequestFormat: 'deepseek-compatible',
+      thinkingRequestFormat: 'zai-compatible',
       maxTokensField: 'max_tokens',
       removeBodyFields: ['store'],
     },

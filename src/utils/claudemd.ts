@@ -1,10 +1,10 @@
 /**
  * Files are loaded in the following order:
  *
- * 1. Managed memory (eg. /etc/neocode/CLAUDE.md) - Global instructions for all users
- * 2. User memory (~/.claude/CLAUDE.md) - Private global instructions for all projects
- * 3. Project memory (AGENTS.md or fallback CLAUDE.md, plus .claude/CLAUDE.md and .claude/rules/*.md in project roots) - Instructions checked into the codebase
- * 4. Local memory (CLAUDE.local.md in project roots) - Private project-specific instructions
+ * 1. Managed memory (eg. /etc/neocode/NEOCODE.md) - Global instructions for all users
+ * 2. User memory (~/.neocode/NEOCODE.md) - Private global instructions for all projects
+ * 3. Project memory (NEOCODE.md or fallback CLAUDE.md, plus .neocode/NEOCODE.md and .neocode/rules/*.md in project roots) - Instructions checked into the codebase
+ * 4. Local memory (NEOCODE.local.md in project roots) - Private project-specific instructions
  *
  * Files are loaded in reverse order of priority, i.e. the latest files are highest priority
  * with the model paying more attention to them.
@@ -13,8 +13,8 @@
  * - User memory is loaded from the user's home directory
  * - Project and Local files are discovered by traversing from the current directory up to root
  * - Files closer to the current directory have higher priority (loaded later)
- * - AGENTS.md is preferred for root project instructions; CLAUDE.md is only used when AGENTS.md is absent
- * - .claude/CLAUDE.md and all .md files in .claude/rules/ are checked in each directory for Project memory
+ * - NEOCODE.md is preferred for root project instructions; AGENTS.md is legacy, and CLAUDE.md is only used when NEOCODE.md is absent
+ * - .neocode/NEOCODE.md, .neocode/CLAUDE.md (backward compatibility), and all .md files in .neocode/rules/ are checked in each directory for Project memory
  *
  * Memory @include directive:
  * - Memory files can include other files using @ notation
@@ -897,31 +897,56 @@ export const getMemoryFiles = memoize(
         pathInWorkingPath(dir, canonicalRoot) &&
         !pathInWorkingPath(dir, gitRoot)
 
-      // Try reading the root project instruction file (AGENTS.md first, otherwise CLAUDE.md)
+      // Try reading the root project instruction file (AGENTS.md first, otherwise NEOCODE.md, then fallback CLAUDE.md)
       if (isSettingSourceEnabled('projectSettings') && !skipProject) {
-        const projectPath = getProjectInstructionFilePath(
-          dir,
-          getFsImplementation().existsSync,
-        )
+        // Check for AGENTS.md first, then NEOCODE.md, then fallback to CLAUDE.md
+        const fs = getFsImplementation()
+        const agentsPath = join(dir, 'AGENTS.md')
+        const neocodePath = join(dir, 'NEOCODE.md')
+        const claudemdPath = join(dir, 'CLAUDE.md')
+
+        const projectPath = fs.existsSync(agentsPath)
+          ? agentsPath
+          : fs.existsSync(neocodePath)
+          ? neocodePath
+          : fs.existsSync(claudemdPath)
+          ? claudemdPath
+          : ''
+
+        if (projectPath) {
+          result.push(
+            ...(await processMemoryFile(
+              projectPath,
+              'Project',
+              processedPaths,
+              includeExternal,
+            )),
+          )
+        }
+
+        // Try reading .neocode/NEOCODE.md (Project) - first choice for .neocode directory
+        const dotNeocodePath = join(dir, '.neocode', 'NEOCODE.md')
         result.push(
           ...(await processMemoryFile(
-            projectPath,
+            dotNeocodePath,
             'Project',
             processedPaths,
             includeExternal,
           )),
         )
 
-        // Try reading .claude/CLAUDE.md (Project)
-        const dotClaudePath = join(dir, '.claude', 'CLAUDE.md')
-        result.push(
-          ...(await processMemoryFile(
-            dotClaudePath,
-            'Project',
-            processedPaths,
-            includeExternal,
-          )),
-        )
+        // Try reading .neocode/CLAUDE.md for backward compatibility (Project)
+        if (!fs.existsSync(dotNeocodePath)) {
+          const dotClaudePath = join(dir, '.neocode', 'CLAUDE.md')
+          result.push(
+            ...(await processMemoryFile(
+              dotClaudePath,
+              'Project',
+              processedPaths,
+              includeExternal,
+            )),
+          )
+        }
 
         // Try reading .claude/rules/*.md files (Project)
         const rulesDir = join(dir, '.claude', 'rules')
@@ -936,17 +961,29 @@ export const getMemoryFiles = memoize(
         )
       }
 
-      // Try reading CLAUDE.local.md (Local) - only if localSettings is enabled
+      // Try reading NEOCODE.local.md (Local) - only if localSettings is enabled
       if (isSettingSourceEnabled('localSettings')) {
-        const localPath = join(dir, 'CLAUDE.local.md')
-        result.push(
-          ...(await processMemoryFile(
-            localPath,
-            'Local',
-            processedPaths,
-            includeExternal,
-          )),
-        )
+        // Check for NEOCODE.local.md first
+        const fs = getFsImplementation()
+        const neocodeLocalPath = join(dir, 'NEOCODE.local.md')
+        const claudelocalPath = join(dir, 'CLAUDE.local.md')
+
+        const localPath = fs.existsSync(neocodeLocalPath)
+          ? neocodeLocalPath
+          : fs.existsSync(claudelocalPath)
+          ? claudelocalPath
+          : ''
+
+        if (localPath) {
+          result.push(
+            ...(await processMemoryFile(
+              localPath,
+              'Local',
+              processedPaths,
+              includeExternal,
+            )),
+          )
+        }
       }
     }
 

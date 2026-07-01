@@ -2,7 +2,7 @@ import type { Command } from '../commands.js'
 import { maybeMarkProjectOnboardingComplete } from '../projectOnboardingState.js'
 import { isNewInitEnabled } from './initMode.js'
 
-const OLD_INIT_PROMPT = `Please analyze this codebase and create a CLAUDE.md file, which will be given to future instances of Neocode to operate in this repository.
+const OLD_INIT_PROMPT = `Please analyze this codebase and create a project instructions file. Neocode supports project-level instruction files: CLAUDE.md (legacy) and NEOCODE.md (modern). For new projects, we recommend using NEOCODE.md.
 
 What to add:
 1. Commands that will be commonly used, such as how to build, lint, and run tests. Include the necessary commands to develop in this codebase, such as how to run a single test.
@@ -24,14 +24,14 @@ Usage notes:
 This file provides guidance to Neocode (claude.ai/code) when working with code in this repository.
 \`\`\``
 
-const NEW_INIT_PROMPT = `Set up a minimal AGENTS.md (and optionally CLAUDE.local.md, skills, and hooks) for this repo. The root project instruction file is loaded into every Neocode session, so it must be concise — only include what Claude would get wrong without it.
+const NEW_INIT_PROMPT = `Set up a minimal NEOCODE.md (and optionally NEOCODE.local.md, skills, and hooks) for this repo. The root project instruction file is loaded into every Neocode session, so it must be concise — only include what Claude would get wrong without it.
 
 ## Phase 1: Ask what to set up
 
 Use AskUserQuestion to find out what the user wants:
 
 - "Which instruction files should /init set up?"
-  Options: "Project AGENTS.md" | "Personal CLAUDE.local.md" | "Both project + personal"
+  Options: "Project NEOCODE.md" | "Personal NEOCODE.local.md" | "Both project + personal"
   Description for project: "Team-shared instructions checked into source control — architecture, coding standards, common workflows."
   Description for personal: "Your private preferences for this project (gitignored, not shared) — your role, sandbox URLs, preferred test data, workflow quirks."
 
@@ -50,8 +50,8 @@ Detect:
 - Project structure (monorepo with workspaces, multi-module, or single project)
 - Code style rules that differ from language defaults
 - Non-obvious gotchas, required env vars, or workflow quirks
-- Existing .claude/skills/ and .claude/rules/ directories
-- Formatter configuration (prettier, biome, ruff, black, gofmt, rustfmt, or a unified format script like \`npm run format\` / \`make fmt\`)
+- Existing .neocode/skills/ and .neocode/rules/ directories
+- Formatter configuration (prettier, biome, ruff, black, gofmt, rustfmt, or a unified format script like npm run format / make fmt) for this repo
 - Git worktree usage: run \`git worktree list\` to check if this repo has multiple worktrees (only relevant if the user wants a personal CLAUDE.local.md)
 
 Note what you could NOT figure out from code alone — these become interview questions.
@@ -91,13 +91,13 @@ If the user chose personal CLAUDE.local.md or both: ask about them, not the code
 
 **Build the preference queue** from the accepted proposal. Each entry: {type: hook|skill|note, description, target file, any Phase-2-sourced details like the actual test/format command}. Phases 4-7 consume this queue.
 
-## Phase 4: Write AGENTS.md (if user chose project or both)
+## Phase 4: Write NEOCODE.md (if user chose project or both)
 
-Write a minimal AGENTS.md at the project root. Every line must pass this test: "Would removing this cause Claude to make mistakes?" If no, cut it.
+Write a minimal NEOCODE.md at the project root. Every line must pass this test: "Would removing this cause Claude to make mistakes?" If no, cut it.
 
-If the repo already has a checked-in root \`CLAUDE.md\` and does NOT already have a root \`AGENTS.md\`, do NOT silently create a second root instruction file. In that case, update the existing root \`CLAUDE.md\` in place by default. Only create or migrate to root \`AGENTS.md\` if the user explicitly asks to migrate.
+If the repo already has a checked-in root \`CLAUDE.md\` and does NOT already have a root \`NEOCODE.md\`, suggest renaming CLAUDE.md to NEOCODE.md. The system will load it for backward compatibility if no NEOCODE.md exists. Only create or migrate to root \`NEOCODE.md\` if the user explicitly asks to migrate.
 
-**Consume \`note\` entries from the Phase 3 preference queue whose target is AGENTS.md** (team-level notes) — add each as a concise line in the most relevant section. These are the behaviors the user wants Claude to follow but didn't need guaranteed (e.g., "propose a plan before implementing", "explain the tradeoffs when refactoring"). Leave personal-targeted notes for Phase 5.
+**Consume \`note\` entries from the Phase 3 preference queue whose target is NEOCODE.md** (team-level notes) — add each as a concise line in the most relevant section. These are the behaviors the user wants Claude to follow but didn't need guaranteed (e.g., "propose a plan before implementing", "explain the tradeoffs when refactoring"). Leave personal-targeted notes for Phase 5.
 
 Include:
 - Build/test/lint commands Claude can't guess (non-standard scripts, flags, or sequences)
@@ -106,7 +106,7 @@ Include:
 - Repo etiquette (branch naming, PR conventions, commit style)
 - Required env vars or setup steps
 - Non-obvious gotchas or architectural decisions
-- Important parts from existing AI coding tool configs if they exist (AGENTS.md, .cursor/rules, .cursorrules, .github/copilot-instructions.md, .windsurfrules, .clinerules)
+- Important parts from existing AI coding tool configs if they exist (CLAUDE.md, .cursor/rules, .cursorrules, .github/copilot-instructions.md, .windsurfrules, .clinerules)
 
 Exclude:
 - File-by-file structure or component lists (Claude can discover these by reading the codebase)
@@ -124,22 +124,22 @@ Do not repeat yourself and do not make up sections like "Common Development Task
 Prefix the file with:
 
 \`\`\`
-# AGENTS.md
+# NEOCODE.md
 
 This file provides guidance to Neocode (claude.ai/code) when working with code in this repository.
 \`\`\`
 
-If AGENTS.md already exists: read it, propose specific changes as diffs, and explain why each change improves it. Do not silently overwrite.
+If NEOCODE.md already exists: read it, propose specific changes as diffs, and explain why each change improves it. Do not silently overwrite.
 
-For projects with multiple concerns, suggest organizing instructions into \`.claude/rules/\` as separate focused files (e.g., \`code-style.md\`, \`testing.md\`, \`security.md\`). These are loaded automatically alongside AGENTS.md and can be scoped to specific file paths using \`paths\` frontmatter.
+For projects with multiple concerns, suggest organizing instructions into \`.neocode/rules/\` as separate focused files (e.g., \`code-style.md\`, \`testing.md\`, \`security.md\`). These are loaded automatically alongside NEOCODE.md and can be scoped to specific file paths using \`paths\` frontmatter.
 
 For projects with distinct subdirectories (monorepos, multi-module projects, etc.): mention that subdirectory AGENTS.md files can be added for module-specific instructions (they're loaded automatically when Claude works in those directories). Offer to create them if the user wants.
 
-## Phase 5: Write CLAUDE.local.md (if user chose personal or both)
+## Phase 5: Write NEOCODE.local.md (if user chose personal or both)
 
-Write a minimal CLAUDE.local.md at the project root. This file is automatically loaded alongside AGENTS.md. After creating it, add \`CLAUDE.local.md\` to the project's .gitignore so it stays private.
+Write a minimal NEOCODE.local.md at the project root. This file is automatically loaded alongside NEOCODE.md. After creating it, add \`NEOCODE.local.md\` to the project's .gitignore so it stays private.
 
-**Consume \`note\` entries from the Phase 3 preference queue whose target is CLAUDE.local.md** (personal-level notes) — add each as a concise line. If the user chose personal-only in Phase 1, this is the sole consumer of note entries.
+**Consume \`note\` entries from the Phase 3 preference queue whose target is NEOCODE.local.md** (personal-level notes) — add each as a concise line. If the user chose personal-only in Phase 1, this is the sole consumer of note entries.
 
 Include:
 - The user's role and familiarity with the codebase (so Claude can calibrate explanations)
@@ -148,9 +148,9 @@ Include:
 
 Keep it short — only include what would make Claude's responses noticeably better for this user.
 
-If Phase 2 found multiple git worktrees and the user confirmed they use sibling/external worktrees (not nested inside the main repo): the upward file walk won't find a single CLAUDE.local.md from all worktrees. Write the actual personal content to \`~/.claude/<project-name>-instructions.md\` and make CLAUDE.local.md a one-line stub that imports it: \`@~/.claude/<project-name>-instructions.md\`. The user can copy this one-line stub to each sibling worktree. Never put this import in the project AGENTS.md. If worktrees are nested inside the main repo (e.g., \`.claude/worktrees/\`), no special handling is needed — the main repo's CLAUDE.local.md is found automatically.
+If Phase 2 found multiple git worktrees and the user confirmed they use sibling/external worktrees (not nested inside the main repo): the upward file walk won't find a single NEOCODE.local.md from all worktrees. Write the actual personal content to \`~/.neocode/<project-name>-instructions.md\` and make NEOCODE.local.md a one-line stub that imports it: \`@~/.neocode/<project-name>-instructions.md\`. The user can copy this one-line stub to each sibling worktree. Never put this import in the project NEOCODE.md. If worktrees are nested inside the main repo (e.g., \`.neocode/worktrees/\`), no special handling is needed — the main repo's NEOCODE.local.md is found automatically.
 
-If CLAUDE.local.md already exists: read it, propose specific additions, and do not silently overwrite.
+If NEOCODE.local.md already exists: read it, propose specific additions, and do not silently overwrite.
 
 ## Phase 6: Suggest and create skills (if user chose "Skills + hooks" or "Skills only")
 
@@ -167,9 +167,9 @@ Skills add capabilities Claude can use on demand without bloating every session.
 
 For each suggested skill, provide: name, one-line purpose, and why it fits this repo.
 
-If \`.claude/skills/\` already exists with skills, review them first. Do not overwrite existing skills — only propose new ones that complement what is already there.
+If \`.neocode/skills/\` already exists with skills, review them first. Do not overwrite existing skills — only propose new ones that complement what is already there.
 
-Create each skill at \`.claude/skills/<skill-name>/SKILL.md\`:
+Create each skill at \`.neocode/skills/<skill-name>/SKILL.md\`:
 
 \`\`\`yaml
 ---
@@ -186,17 +186,15 @@ Both the user (\`/<skill-name>\`) and Claude can invoke skills by default. For w
 
 Tell the user you're going to suggest a few additional optimizations now that AGENTS.md and skills (if chosen) are in place.
 
-Check the environment and ask about each gap you find (use AskUserQuestion):
+**Proposal-sourced hooks** (if user chose "Skills + hooks" or "Hooks only"): Consume hook entries from the Phase 3 preference queue. If Phase 2 found a formatter and the queue has no formatting hook, offer format-on-edit as a fallback. If the user chose "Neither" or "Skills only" in Phase 1, skip this bullet entirely.
 
 - **GitHub CLI**: Run \`which gh\` (or \`where gh\` on Windows). If it's missing AND the project uses GitHub (check \`git remote -v\` for github.com), ask the user if they want to install it. Explain that the GitHub CLI lets Claude help with commits, pull requests, issues, and code review directly.
 
 - **Linting**: If Phase 2 found no lint config (no .eslintrc, ruff.toml, .golangci.yml, etc. for the project's language), ask the user if they want Claude to set up linting for this codebase. Explain that linting catches issues early and gives Claude fast feedback on its own edits.
 
-- **Proposal-sourced hooks** (if user chose "Skills + hooks" or "Hooks only"): Consume \`hook\` entries from the Phase 3 preference queue. If Phase 2 found a formatter and the queue has no formatting hook, offer format-on-edit as a fallback. If the user chose "Neither" or "Skills only" in Phase 1, skip this bullet entirely.
-
   For each hook preference (from the queue or the formatter fallback):
 
-  1. Target file: default based on the Phase 1 instruction-file choice — project → \`.claude/settings.json\` (team-shared, committed); personal → \`.claude/settings.local.json\`. Only ask if the user chose "both" in Phase 1 or the preference is ambiguous. Ask once for all hooks, not per-hook.
+  1. Target file: default based on the Phase 1 instruction-file choice — project → \`.neocode/settings.json\` (team-shared, committed); personal → \`.neocode/settings.local.json\`. Only ask if the user chose "both" in Phase 1 or the preference is ambiguous. Ask once for all hooks, not per-hook.
 
   2. Pick the event and matcher from the preference:
      - "after every edit" → \`PostToolUse\` with matcher \`Write|Edit\`

@@ -9,7 +9,7 @@ import { Box, Text } from '../../ink.js';
 import { useKeybindings } from '../../keybindings/useKeybinding.js';
 import type { Theme } from '../../utils/theme.js';
 type TabsProps = {
-  children: Array<React.ReactElement<TabProps>>;
+  children: React.ReactNode;
   title?: string;
   color?: keyof Theme;
   defaultTab?: string;
@@ -85,7 +85,8 @@ export function Tabs(t0) {
   const {
     columns: terminalWidth
   } = useTerminalSize();
-  const tabs = children.map(_temp);
+  const tabChildren = React.Children.toArray(children).filter(React.isValidElement) as Array<React.ReactElement<TabProps>>;
+  const tabs = tabChildren.map(_temp);
   const defaultTabIndex = defaultTab ? tabs.findIndex(tab => defaultTab === tab[0]) : 0;
   const isControlled = controlledSelectedTab !== undefined;
   const [internalSelectedTab, setInternalSelectedTab] = useState(defaultTabIndex !== -1 ? defaultTabIndex : 0);
@@ -207,7 +208,7 @@ export function Tabs(t0) {
     })}{spacerWidth > 0 && <Text>{" ".repeat(spacerWidth)}</Text>}</Box>;
   let t17;
   if ($[11] !== children || $[12] !== contentHeight || $[13] !== contentWidth || $[14] !== hidden || $[15] !== modalScrollRef || $[16] !== selectedTabIndex) {
-    t17 = modalScrollRef ? <Box width={contentWidth} marginTop={hidden ? 0 : 1} flexShrink={0}><ScrollBox key={selectedTabIndex} ref={modalScrollRef} flexDirection="column" flexShrink={0}>{children}</ScrollBox></Box> : <Box width={contentWidth} marginTop={hidden ? 0 : 1} height={contentHeight} overflowY={contentHeight !== undefined ? "hidden" : undefined}>{children}</Box>;
+    t17 = modalScrollRef ? <Box width={contentWidth} marginTop={hidden ? 0 : 1} flexShrink={0}><ScrollBox key={selectedTabIndex} ref={modalScrollRef} flexDirection="column" flexShrink={0}>{tabChildren}</ScrollBox></Box> : <Box width={contentWidth} marginTop={hidden ? 0 : 1} height={contentHeight} overflowY={contentHeight !== undefined ? "hidden" : undefined}>{tabChildren}</Box>;
     $[11] = children;
     $[12] = contentHeight;
     $[13] = contentWidth;
@@ -337,3 +338,4 @@ export function useTabHeaderFocus() {
   }
   return t1;
 }
+

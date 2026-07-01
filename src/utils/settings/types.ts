@@ -1065,6 +1065,54 @@ export const SettingsSchema = lazySchema(() =>
         .enum(['disable'])
         .optional()
         .describe('Disable auto mode'),
+      // Auto-accept configuration for safe read-only tools and commands
+      autoAccept: z
+        .object({
+          // Whether to enable auto-accept for read-only tools (Read, Glob, Grep) in working directories
+          readGlobGrep: z
+            .boolean()
+            .optional()
+            .default(true)
+            .describe(
+              'Enable auto-accept for Read, Glob, Grep tools in working directories',
+            ),
+          // Whether to enable auto-accept for safe read-only Bash prefixes (ls, cat, git log, etc.)
+          bashPrefixes: z
+            .boolean()
+            .optional()
+            .default(true)
+            .describe('Enable auto-accept for safe read-only Bash command prefixes'),
+          // User-extendable list of additional safe Bash prefixes (exact-prefix match)
+          customBashPrefixes: z
+            .array(z.string())
+            .optional()
+            .default([])
+            .describe(
+              'Additional safe Bash command prefixes to auto-allow (e.g., ["my-safe-cmd --list"])',
+            ),
+          // Maximum path depth to allow auto-accept (blocks deep app paths like node_modules/.cache/...). 0 disables depth check.
+          maxDepth: z
+            .number()
+            .int()
+            .nonnegative()
+            .optional()
+            .default(6)
+            .describe(
+              'Maximum path segment depth for auto-accept (default 6). 0 disables depth limit.',
+            ),
+          // Additional path prefixes to block from auto-accept (system dirs, credential stores)
+          excludedPaths: z
+            .array(z.string())
+            .optional()
+            .default([])
+            .describe(
+              'Additional absolute path prefixes to block from auto-accept (e.g., ["/opt/secret", "~/.my-creds"])',
+            ),
+        })
+        .optional()
+        .describe(
+          'Auto-accept configuration for safe read-only tools and commands',
+        ),
       sshConfigs: z
         .array(
           z.object({

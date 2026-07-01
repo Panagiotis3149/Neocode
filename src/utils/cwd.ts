@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'async_hooks'
-import { getCwdState, getOriginalCwd } from '../bootstrap/state.js'
+import { getOriginalCwd } from '../bootstrap/state.js'
+import { getCwdState } from '../bootstrap/state.js'
 
 const cwdOverrideStorage = new AsyncLocalStorage<string>()
 
@@ -29,4 +30,8 @@ export function getCwd(): string {
   } catch {
     return getOriginalCwd()
   }
+}
+
+export function getOriginalCwd(): string {
+    return getOriginalCwd()
 }

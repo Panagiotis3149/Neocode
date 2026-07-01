@@ -53,3 +53,18 @@ export function isProjectInstructionFileName(name: string): boolean {
     name === FALLBACK_PROJECT_INSTRUCTION_FILE
   )
 }
+
+export function isLegacyClaudeMdName(name: string): boolean {
+  return name === 'CLAUDE.md'
+}
+
+export function shouldShowLegacyFileRenameWarning(
+  dir: string,
+  existsSync: (path: string) => boolean,
+): boolean {
+  if (!existsSync(dir)) return false
+
+  const legacyPath = join(dir, 'CLAUDE.md')
+  const newPath = join(dir, 'NEOCODE.md')
+  return existsSync(legacyPath) && !existsSync(newPath)
+}

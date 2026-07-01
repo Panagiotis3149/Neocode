@@ -1215,6 +1215,99 @@ export const GH_READ_ONLY_COMMANDS: Record<string, ExternalCommandConfig> = {
     },
     additionalCommandIsDangerousCallback: ghIsDangerousCallback,
   },
+  // gh pr browse is read-only — opens PR in browser (no flag validation needed beyond repo)
+  // NOTE: --web/-w intentionally excluded (opens browser, but here browse IS the web action — still excluded to avoid double-browser)
+  'gh pr browse': {
+    safeFlags: {
+      '--repo': 'string', // Target repository
+      '-R': 'string',
+      '--web': 'none', // Open in browser
+    },
+    additionalCommandIsDangerousCallback: ghIsDangerousCallback,
+  },
+  // gh run list is read-only — lists workflow runs (EXTENDED flags)
+  'gh run list': {
+    safeFlags: {
+      '--branch': 'string', // Filter by branch
+      '-b': 'string',
+      '--status': 'string', // Filter by status
+      '-s': 'string',
+      '--workflow': 'string', // Filter by workflow
+      '-w': 'string', // NOTE: -w is --workflow here, NOT --web (gh run list has no --web)
+      '--limit': 'number', // Max results
+      '-L': 'number',
+      '--json': 'string', // JSON field selection
+      '--repo': 'string', // Target repository
+      '-R': 'string',
+      '--event': 'string', // Filter by event type
+      '-e': 'string',
+      '--user': 'string', // Filter by user
+      '-u': 'string',
+      '--created': 'string', // Filter by creation date
+      '--commit': 'string', // Filter by commit SHA
+      '-c': 'string',
+    },
+    additionalCommandIsDangerousCallback: ghIsDangerousCallback,
+  },
+  // gh run view is read-only — displays a workflow run's details (EXTENDED flags)
+  'gh run view': {
+    safeFlags: {
+      '--log': 'none', // Show full run log
+      '--log-failed': 'none', // Show log for failed steps only
+      '-f': 'none', // NOTE: -f is --log-failed here
+      '--exit-status': 'none', // Exit with run's status code
+      '--verbose': 'none', // Show job steps
+      '-v': 'none', // NOTE: -v is --verbose here, NOT --web
+      '--json': 'string', // JSON field selection
+      '--repo': 'string', // Target repository
+      '-R': 'string',
+      '--job': 'string', // View a specific job by ID
+      '-j': 'string',
+      '--attempt': 'number', // View a specific attempt
+      '-a': 'number',
+    },
+    additionalCommandIsDangerousCallback: ghIsDangerousCallback,
+  },
+  // gh workflow list is read-only — lists workflow files (EXTENDED flags)
+  'gh workflow list': {
+    safeFlags: {
+      '--all': 'none', // Include disabled workflows
+      '-a': 'none',
+      '--json': 'string', // JSON field selection
+      '--limit': 'number', // Max results
+      '-L': 'number',
+      '--repo': 'string', // Target repository
+      '-R': 'string',
+    },
+    additionalCommandIsDangerousCallback: ghIsDangerousCallback,
+  },
+  // gh release list is read-only — lists releases (EXTENDED flags)
+  'gh release list': {
+    safeFlags: {
+      '--exclude-drafts': 'none', // Exclude draft releases
+      '--exclude-pre-releases': 'none', // Exclude pre-releases
+      '--json': 'string', // JSON field selection
+      '--limit': 'number', // Max results
+      '-L': 'number',
+      '--order': 'string', // Order: asc|desc
+      '-O': 'string',
+      '--repo': 'string', // Target repository
+      '-R': 'string',
+    },
+    additionalCommandIsDangerousCallback: ghIsDangerousCallback,
+  },
+  // gh release view is read-only — displays release details (EXTENDED flags)
+  // NOTE: --web/-w intentionally excluded (opens browser)
+  'gh release view': {
+    safeFlags: {
+      '--json': 'string', // JSON field selection
+      '--repo': 'string', // Target repository
+      '-R': 'string',
+      '--web': 'none', // Open in browser
+      '-w': 'none',
+    },
+    additionalCommandIsDangerousCallback: ghIsDangerousCallback,
+  },
   // gh search repos is read-only — searches repositories
   // NOTE: --web/-w intentionally excluded (opens browser)
   'gh search repos': {
@@ -1539,7 +1632,122 @@ export const PYRIGHT_READ_ONLY_COMMANDS: Record<string, ExternalCommandConfig> =
 export const EXTERNAL_READONLY_COMMANDS: readonly string[] = [
   // Cross-platform external tools that work the same in bash and PowerShell on Windows
   'docker ps',
-  'docker images',
+ 'docker images',
+] as const
+
+// ---------------------------------------------------------------------------
+// STATIC_SAFE_BASH_PREFIXES — safe read-only Bash command prefixes
+// These are anchored prefix matches (starts with, case-sensitive, trimmed).
+// When a Bash command starts with one of these prefixes AND passes the
+// suspicious shell syntax check, it can be auto-allowed.
+// ---------------------------------------------------------------------------
+
+/**
+ * Static list of safe read-only Bash command prefixes.
+ * Each entry is an exact prefix match (anchored at start, case-sensitive, after trimming).
+ * Used by the auto-accept logic in readAutoAcceptGuard.ts.
+ */
+export const STATIC_SAFE_BASH_PREFIXES: readonly string[] = [
+  // Archive listing
+  'unzip -l',
+  'unzip -t',
+  'jar tf',
+  'jar -tf',
+  'jar --list',
+  'tar -tf',
+  'tar --list',
+  'python -m zipfile -l',
+
+  // Package managers (read-only)
+  'npm view',
+  'npm info',
+  'npm ls',
+  'npm list',
+  'pip show',
+  'pip show -f',
+  'pip list',
+  'pip freeze',
+  'cargo metadata',
+  'cargo tree',
+  'cargo search',
+  'go list',
+  'go mod graph',
+  'go mod verify',
+
+  // Git (read-only)
+  'git log',
+  'git status',
+  'git diff',
+  'git show',
+  'git branch',
+  'git remote',
+  'git rev-parse',
+  'git ls-files',
+  'git ls-remote',
+  'git config --get',
+  'git config --list',
+  'git reflog',
+  'git shortlog',
+  'git stash list',
+  'git tag',
+  'git describe',
+  'git blame',
+  'git cat-file',
+  'git for-each-ref',
+  'git grep',
+  'git merge-base',
+  'git rev-list',
+  'git worktree list',
+
+  // File system (read-only)
+  'ls ',
+  'find ',
+  'tree',
+  'file ',
+  'wc ',
+  'head',
+  'tail',
+  'cat',
+  'echo',
+  'pwd',
+  'which ',
+  'where ',
+  'jq ',
+  'python -c',
+  'python -m json.tool',
+  'tree -L',
+  'du ',
+  'df ',
+  'ps ',
+  'date',
+  'hexdump ',
+  'od ',
+  'strings ',
+
+  // GitHub CLI
+  'gh ',
+  'gh pr view',
+  'gh pr list',
+  'gh pr diff',
+  'gh pr checks',
+  'gh issue view',
+  'gh issue list',
+  'gh repo view',
+  'gh run list',
+  'gh run view',
+  'gh auth status',
+  'gh pr status',
+  'gh issue status',
+  'gh release list',
+  'gh release view',
+  'gh workflow list',
+  'gh workflow view',
+  'gh label list',
+  'gh search repos',
+  'gh search issues',
+  'gh search prs',
+  'gh search commits',
+  'gh search code',
 ] as const
 
 // ---------------------------------------------------------------------------

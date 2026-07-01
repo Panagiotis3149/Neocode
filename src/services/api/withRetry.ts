@@ -33,6 +33,7 @@ import {
   triggerFastModeCooldown,
 } from '../../utils/fastMode.js'
 import { consumePendingRotation, getActiveApiKey, getProviderByApiKey, notifyRateLimitError } from './backupTokenManager.js'
+import { getActiveProviderProfile } from '../../utils/providerProfiles.js'
 import { isNonCustomOpusModel } from '../../utils/model/model.js'
 import { disableKeepAlive } from '../../utils/proxy.js'
 import { sleep } from '../../utils/sleep.js'
@@ -294,7 +295,7 @@ export async function* withRetry<T>(
       // If the configured error threshold is crossed, the manager rotates to the
       // next configured key and we force a fresh client so the new key is used.
       if (error instanceof APIError && error.status === 429) {
-        const currentProvider = getAPIProvider()
+        const currentProvider = getActiveProviderProfile()?.id ?? getAPIProvider()
         const currentKey = getActiveApiKey(currentProvider)
         const providerName = getProviderByApiKey(currentKey) ?? currentProvider
         notifyRateLimitError(error, providerName)

@@ -415,7 +415,7 @@ export type GlobalConfig = {
   // Btw usage tracking
   btwUseCount: number // Number of times user has used /btw
 
-  // Sponsored tips (ads.gitlawb.com) — opt-in earning of opengateway credits.
+
   // Managed via the /ads command, NOT /config — intentionally excluded from
   // GLOBAL_CONFIG_KEYS (the earnCode is a credential, never surfaced in /config).
   ads?: {

@@ -17,6 +17,7 @@ import {
 } from '../../utils/permissions/filesystem.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 import { matchWildcardPattern } from '../../utils/permissions/shellRuleMatching.js'
+import { isAutoAcceptSafeGlobPattern } from '../../utils/permissions/readAutoAcceptGuard.js'
 import { getGlobExclusionsForPluginCache } from '../../utils/plugins/orphanedPluginFilter.js'
 import { ripGrep } from '../../utils/ripgrep.js'
 import { semanticBoolean } from '../../utils/semanticBoolean.js'
@@ -232,6 +233,19 @@ export const GrepTool = buildTool({
   },
   async checkPermissions(input, context): Promise<PermissionDecision> {
     const appState = context.getAppState()
+
+    // Auto-accept guard: block unsafe patterns/paths before checking auto-allow rules
+    if (input.path && !isAutoAcceptSafeGlobPattern(input.path)) {
+      return {
+        behavior: 'ask',
+        message: `Neocode requested permissions to grep in ${input.path}, but the path is outside the workspace or matches a blocked directory.`,
+        decisionReason: {
+          type: 'safetyCheck',
+          reason: 'Path is outside allowed workspace or matches blocked system/credential directory',
+        },
+      }
+    }
+
     return checkReadPermissionForTool(
       GrepTool,
       input,

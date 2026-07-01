@@ -14,6 +14,8 @@ import { expandPath, toRelativePath } from '../../utils/path.js'
 import { checkReadPermissionForTool } from '../../utils/permissions/filesystem.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 import { matchWildcardPattern } from '../../utils/permissions/shellRuleMatching.js'
+import { isAutoAcceptSafeGlobPattern } from '../../utils/permissions/readAutoAcceptGuard.js'
+import { PRODUCT_DISPLAY_NAME } from '../../constants/product.js'
 import { DESCRIPTION, GLOB_TOOL_NAME } from './prompt.js'
 import {
   getToolUseSummary,
@@ -134,6 +136,19 @@ export const GlobTool = buildTool({
   },
   async checkPermissions(input, context): Promise<PermissionDecision> {
     const appState = context.getAppState()
+
+    // Check if auto-accept should be blocked for this pattern
+    if (!isAutoAcceptSafeGlobPattern(input.pattern)) {
+      return {
+        behavior: 'ask',
+        message: `${PRODUCT_DISPLAY_NAME} requested permissions to glob for ${input.pattern}, but you haven't granted it yet.`,
+        decisionReason: {
+          type: 'safetyCheck',
+          reason: 'Pattern matches sensitive directory or uses unsafe path traversal',
+        },
+      }
+    }
+
     return checkReadPermissionForTool(
       GlobTool,
       input,

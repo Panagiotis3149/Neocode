@@ -2,8 +2,15 @@ import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 
 import type { AttachmentMessage, UserMessage } from '../types/message.js'
 
-const DEFAULT_TOOL_FAILURE_LOOP_THRESHOLD = 3
+const DEFAULT_TOOL_FAILURE_LOOP_THRESHOLD = 5
 const MAX_FALLBACK_CATEGORY_LENGTH = 120
+
+/**
+ * Number of consecutive failures at which Neocode tells the model to pivot
+ * (change approach) rather than stop. Must be strictly less than
+ * DEFAULT_TOOL_FAILURE_LOOP_THRESHOLD so the pivot fires before the halt.
+ */
+const PIVOT_TOOL_FAILURE_COUNT = 3
 
 export type ToolFailureLoopGuardState = {
   persistentSignatureCounts: Map<string, number>
@@ -16,8 +23,10 @@ export type ToolFailureLoopGuardDecision =
   | { tripped: false }
   | {
       tripped: true
+      phase: 'pivot' | 'halt'
       message: string
       threshold: number
+      pivotCount: number
       kind: 'signature' | 'category' | 'path'
       toolName?: string
       errorCategory?: string
@@ -111,16 +120,24 @@ export function updateToolFailureLoopGuard(params: {
       `${failure.toolName}\0${failure.errorCategory}`,
     )
 
-    if (persistentSignatureCount >= threshold) {
+    const persistentPhase = decideFailurePhase(
+      persistentSignatureCount,
+      threshold,
+    )
+    if (persistentPhase) {
       return {
         tripped: true,
+        phase: persistentPhase,
         kind: 'signature',
         threshold,
+        pivotCount: PIVOT_TOOL_FAILURE_COUNT,
         toolName: failure.toolName,
         errorCategory: failure.errorCategory,
         message: createTripMessage({
           kind: 'signature',
+          phase: persistentPhase,
           threshold,
+          pivotCount: PIVOT_TOOL_FAILURE_COUNT,
           toolName: failure.toolName,
           errorCategory: failure.errorCategory,
         }),
@@ -134,15 +151,20 @@ export function updateToolFailureLoopGuard(params: {
     }
 
     const pathCount = incrementCounter(params.state.pathCounts, failure.path)
-    if (pathCount >= threshold) {
+    const pathPhase = decideFailurePhase(pathCount, threshold)
+    if (pathPhase) {
       return {
         tripped: true,
+        phase: pathPhase,
         kind: 'path',
         threshold,
+        pivotCount: PIVOT_TOOL_FAILURE_COUNT,
         path: failure.path,
         message: createTripMessage({
           kind: 'path',
+          phase: pathPhase,
           threshold,
+          pivotCount: PIVOT_TOOL_FAILURE_COUNT,
           path: failure.path,
         }),
       }
@@ -163,31 +185,41 @@ export function updateToolFailureLoopGuard(params: {
       params.state.categoryCounts,
       failure.errorCategory,
     )
-    if (signatureCount >= threshold) {
+    const signaturePhase = decideFailurePhase(signatureCount, threshold)
+    if (signaturePhase) {
       return {
         tripped: true,
+        phase: signaturePhase,
         kind: 'signature',
         threshold,
+        pivotCount: PIVOT_TOOL_FAILURE_COUNT,
         toolName: failure.toolName,
         errorCategory: failure.errorCategory,
         message: createTripMessage({
           kind: 'signature',
+          phase: signaturePhase,
           threshold,
+          pivotCount: PIVOT_TOOL_FAILURE_COUNT,
           toolName: failure.toolName,
           errorCategory: failure.errorCategory,
         }),
       }
     }
 
-    if (categoryCount >= threshold) {
+    const categoryPhase = decideFailurePhase(categoryCount, threshold)
+    if (categoryPhase) {
       return {
         tripped: true,
+        phase: categoryPhase,
         kind: 'category',
         threshold,
+        pivotCount: PIVOT_TOOL_FAILURE_COUNT,
         errorCategory: failure.errorCategory,
         message: createTripMessage({
           kind: 'category',
+          phase: categoryPhase,
           threshold,
+          pivotCount: PIVOT_TOOL_FAILURE_COUNT,
           errorCategory: failure.errorCategory,
         }),
       }
@@ -208,6 +240,23 @@ type FailureInfo = {
   toolName: string
   errorCategory: string
   path: string | undefined
+}
+
+/**
+ * Decides whether a counter of N consecutive identical failures should produce
+ * a 'pivot' (keep going, change approach) or a 'halt' (stop the turn) phase.
+ *
+ * N < PIVOT_TOOL_FAILURE_COUNT  → not enough signal yet → false
+ * PIVOT_TOOL_FAILURE_COUNT <= N < threshold  → 'pivot'
+ * N >= threshold  → 'halt'
+ */
+export function decideFailurePhase(
+  count: number,
+  threshold: number = DEFAULT_TOOL_FAILURE_LOOP_THRESHOLD,
+): 'pivot' | 'halt' | false {
+  if (count >= threshold) return 'halt'
+  if (count >= PIVOT_TOOL_FAILURE_COUNT) return 'pivot'
+  return false
 }
 
 function normalizeThreshold(threshold: number | undefined): number {
@@ -399,15 +448,35 @@ function incrementCounter(counts: Map<string, number>, key: string): number {
 
 function createTripMessage(
   detail:
-    | { kind: 'path'; threshold: number; path: string }
+    | { kind: 'path'; phase: 'pivot' | 'halt'; pivotCount: number; threshold: number; path: string }
     | {
         kind: 'signature'
+        phase: 'pivot' | 'halt'
+        pivotCount: number
         threshold: number
         toolName: string
         errorCategory: string
       }
-    | { kind: 'category'; threshold: number; errorCategory: string },
+    | { kind: 'category'; phase: 'pivot' | 'halt'; pivotCount: number; threshold: number; errorCategory: string },
 ): string {
+  if (detail.phase === 'pivot') {
+    let reason: string
+    if (detail.kind === 'path') {
+      reason = `The path \`${detail.path}\` has failed repeatedly.`
+    } else if (detail.kind === 'signature') {
+      reason = `\`${detail.toolName}\` has failed ${detail.pivotCount} times with \`${detail.errorCategory}\`.`
+    } else {
+      reason = `Tool calls have failed ${detail.pivotCount} times with \`${detail.errorCategory}\`.`
+    }
+    return [
+      'Repeated tool failures detected.',
+      '',
+      `${reason} Before retrying, read the actual error carefully, validate paths/permissions/inputs, then try a DIFFERENT approach: use a different tool, a different command, or split the work into smaller steps.`,
+      '',
+      `Neocode will stop this attempt after ${detail.threshold} total failures of the same kind.`,
+    ].join('\n')
+  }
+
   let reason: string
   if (detail.kind === 'path') {
     reason = `The path \`${detail.path}\` failed ${detail.threshold} times.`

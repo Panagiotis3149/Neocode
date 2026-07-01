@@ -19,6 +19,7 @@ export default defineGateway({
     kind: 'openai-compatible',
     openaiShim: {
       supportsAuthHeaders: true,
+      thinkingRequestFormat: 'enabled',
     },
   },
   preset: {

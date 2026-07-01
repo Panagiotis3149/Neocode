@@ -1824,13 +1824,14 @@ async function* queryLoop(
     })
     if (toolFailureLoopDecision.tripped) {
       logForDebugging(
-        `Tool failure loop guard tripped: kind=${toolFailureLoopDecision.kind} ` +
+        `Tool failure loop guard tripped: phase=${toolFailureLoopDecision.phase} kind=${toolFailureLoopDecision.kind} ` +
           `threshold=${toolFailureLoopDecision.threshold} ` +
           `hasToolName=${toolFailureLoopDecision.toolName !== undefined} ` +
           `hasErrorCategory=${toolFailureLoopDecision.errorCategory !== undefined} ` +
           `hasPath=${toolFailureLoopDecision.path !== undefined}`,
       )
       logEvent('tengu_tool_failure_loop_guard_tripped', {
+        phase: toolFailureLoopDecision.phase,
         threshold: toolFailureLoopDecision.threshold,
         isPathTrip: toolFailureLoopDecision.kind === 'path',
         isSignatureTrip: toolFailureLoopDecision.kind === 'signature',

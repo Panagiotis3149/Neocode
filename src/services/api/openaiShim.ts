@@ -32,6 +32,10 @@ import {
 } from '../../utils/codexCredentials.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isBareMode, isEnvTruthy } from '../../utils/envUtils.js'
+import {
+  resolveModelReasoningControl,
+  resolveOpenAIShimReasoningRequestPlan,
+} from '../../utils/effort.js'
 import { resolveGeminiCredential } from '../../utils/geminiAuth.js'
 import { hydrateGeminiAccessTokenFromSecureStorage } from '../../utils/geminiCredentials.js'
 import { hydrateGithubModelsTokenFromSecureStorage } from '../../utils/githubModelsCredentials.js'
@@ -203,12 +207,6 @@ function hasCerebrasApiHost(baseUrl: string | undefined): boolean {
   } catch {
     return false
   }
-}
-
-function normalizeDeepSeekReasoningEffort(
-  effort: 'low' | 'medium' | 'high' | 'xhigh',
-): 'high' | 'max' {
-  return effort === 'xhigh' ? 'max' : 'high'
 }
 
 function formatRetryAfterHint(response: Response): string {
@@ -2072,6 +2070,22 @@ class OpenAIShimMessages {
       ),
     })
 
+   const reasoningControl = resolveModelReasoningControl(request.resolvedModel, {
+      routeId: runtimeShimContext.routeId,
+      useRuntimeFallback: false,
+      openaiShimConfig: shimConfig,
+    })
+    const reasoningRequestPlan = resolveOpenAIShimReasoningRequestPlan({
+      model: request.resolvedModel,
+      requestedEffort: request.reasoning?.effort,
+      requestThinkingType: (params.thinking as { type?: string } | undefined)?.type,
+      defaultThinkingType: request.thinking?.type,
+      thinkingRequestFormat: shimConfig.thinkingRequestFormat,
+      routeId: runtimeShimContext.routeId,
+      useRuntimeFallback: false,
+      reasoningControl,
+    })
+
     const body: Record<string, unknown> = {
       model: request.resolvedModel,
       messages: openaiMessages,
@@ -2137,25 +2151,32 @@ class OpenAIShimMessages {
     if (params.temperature !== undefined) body.temperature = params.temperature
     if (params.top_p !== undefined) body.top_p = params.top_p
 
-    if (shimConfig.thinkingRequestFormat === 'deepseek-compatible') {
-      const requestedThinkingType = (params.thinking as { type?: string } | undefined)?.type
-      const deepSeekThinkingType =
-        requestedThinkingType === 'disabled'
-          ? 'disabled'
-          : requestedThinkingType === 'enabled' || requestedThinkingType === 'adaptive'
-            ? 'enabled'
-            : undefined
-
-      if (deepSeekThinkingType) {
-        body.thinking = { type: deepSeekThinkingType }
+    if (reasoningRequestPlan.wireFormat === 'deepseek_compatible') {
+      if (reasoningRequestPlan.thinkingType) {
+        body.thinking = { type: reasoningRequestPlan.thinkingType }
       }
-
-      if (deepSeekThinkingType === 'enabled') {
-        const effort = request.reasoning?.effort
-        if (effort) {
-          body.reasoning_effort = normalizeDeepSeekReasoningEffort(effort)
-        }
+      if (reasoningRequestPlan.reasoningEffort) {
+        body.reasoning_effort = reasoningRequestPlan.reasoningEffort
       }
+    }
+
+    if (reasoningRequestPlan.wireFormat === 'zai_compatible') {
+      if (reasoningRequestPlan.thinkingType) {
+        body.thinking = { type: reasoningRequestPlan.thinkingType }
+      }
+      if (reasoningRequestPlan.thinkingType === 'disabled') {
+        delete body.reasoning_effort
+      } else if (reasoningRequestPlan.reasoningEffort) {
+        body.reasoning_effort = reasoningRequestPlan.reasoningEffort
+      } else {
+        delete body.reasoning_effort
+      }
+    }
+
+    // Route/model strip rules are authoritative even when compatibility
+    // serializers add provider-specific reasoning fields later in the pipeline.
+    for (const field of shimConfig.removeBodyFields ?? []) {
+      delete body[field]
     }
 
     if (params.tools && params.tools.length > 0) {
@@ -2229,6 +2250,14 @@ class OpenAIShimMessages {
 
       if (params.temperature !== undefined) responsesBody.temperature = params.temperature
       if (params.top_p !== undefined) responsesBody.top_p = params.top_p
+
+       if (reasoningRequestPlan.wireFormat === 'reasoning_effort' && reasoningRequestPlan.reasoningEffort) {
+        responsesBody.reasoning = {
+          effort: reasoningRequestPlan.reasoningEffort,
+          summary: 'auto',
+        }
+        responsesBody.include = ['reasoning.encrypted_content']
+      }
 
       if (!omitResponsesTools && params.tools && params.tools.length > 0) {
         const convertedTools = convertToolsToResponsesTools(

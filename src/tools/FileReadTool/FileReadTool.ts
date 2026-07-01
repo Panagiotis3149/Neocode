@@ -58,6 +58,7 @@ import {
   readNotebook,
 } from '../../utils/notebook.js'
 import { expandPath } from '../../utils/path.js'
+import { PRODUCT_DISPLAY_NAME } from '../../constants/product.js'
 import { extractPDFPages, getPDFPageCount, readPDF } from '../../utils/pdf.js'
 import {
   isPDFExtension,
@@ -68,6 +69,7 @@ import {
   checkReadPermissionForTool,
   matchingRuleForInput,
 } from '../../utils/permissions/filesystem.js'
+import { isAutoAcceptBlockedPath } from '../../utils/permissions/readAutoAcceptGuard.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 import { matchWildcardPattern } from '../../utils/permissions/shellRuleMatching.js'
 import { readFileInRange } from '../../utils/readFileInRange.js'
@@ -397,6 +399,20 @@ export const FileReadTool = buildTool({
   },
   async checkPermissions(input, context): Promise<PermissionDecision> {
     const appState = context.getAppState()
+
+    // Check if auto-accept should be blocked for this path
+    const fullFilePath = expandPath(input.file_path)
+    if (isAutoAcceptBlockedPath(fullFilePath)) {
+      return {
+        behavior: 'ask',
+        message: `${PRODUCT_DISPLAY_NAME} requested permissions to read from ${input.file_path}, but you haven't granted it yet.`,
+        decisionReason: {
+          type: 'safetyCheck',
+          reason: 'Path is in a sensitive directory or exceeds depth limit for auto-accept',
+        },
+      }
+    }
+
     return checkReadPermissionForTool(
       FileReadTool,
       input,
