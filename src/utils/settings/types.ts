@@ -1090,16 +1090,6 @@ export const SettingsSchema = lazySchema(() =>
             .describe(
               'Additional safe Bash command prefixes to auto-allow (e.g., ["my-safe-cmd --list"])',
             ),
-          // Maximum path depth to allow auto-accept (blocks deep app paths like node_modules/.cache/...). 0 disables depth check.
-          maxDepth: z
-            .number()
-            .int()
-            .nonnegative()
-            .optional()
-            .default(6)
-            .describe(
-              'Maximum path segment depth for auto-accept (default 6). 0 disables depth limit.',
-            ),
           // Additional path prefixes to block from auto-accept (system dirs, credential stores)
           excludedPaths: z
             .array(z.string())

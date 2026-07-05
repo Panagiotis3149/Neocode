@@ -1842,6 +1842,15 @@ async function* queryLoop(
         hasPath: toolFailureLoopDecision.path !== undefined,
         queryDepth: queryTracking.depth,
       })
+
+      // At pivot phase (3x failures), silently alert and continue the turn
+      // The model sees the failed tool results and can try a different approach
+      if (toolFailureLoopDecision.phase === 'pivot') {
+        // Silent alert - logging only, turn continues
+        continue
+      }
+
+      // At halt phase (5x failures), yield error and stop the turn
       yield createAssistantAPIErrorMessage({
         content: toolFailureLoopDecision.message,
       })

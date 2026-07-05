@@ -408,7 +408,7 @@ export const FileReadTool = buildTool({
         message: `${PRODUCT_DISPLAY_NAME} requested permissions to read from ${input.file_path}, but you haven't granted it yet.`,
         decisionReason: {
           type: 'safetyCheck',
-          reason: 'Path is in a sensitive directory or exceeds depth limit for auto-accept',
+          reason: 'Path is in a sensitive directory or fails a custom check',
         },
       }
     }
