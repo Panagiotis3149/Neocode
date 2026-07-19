@@ -61,6 +61,7 @@ import type {
 import { count } from '../../utils/array.js'
 import { createAttachmentMessage } from '../../utils/attachments.js'
 import { logForDebugging } from '../../utils/debug.js'
+import { checkDoomLoop } from '../../utils/doomLoop.js'
 import {
   AbortError,
   errorMessage,
@@ -680,6 +681,36 @@ async function checkPermissionsAndCallTool(
   ) => void,
 ): Promise<MessageUpdateLazy[]> {
   const normalizedInput = normalizeToolInputForValidation(tool, input)
+
+  // Doom loop detection: block after N consecutive identical tool calls.
+  // Keyed by agent so concurrent subagents don't pollute each other's counters.
+  const { blocked, count } = checkDoomLoop(tool.name, input, {
+    agentKey: toolUseContext.agentId,
+  })
+  if (blocked) {
+    const warning = `Blocked: This tool has been called ${count} times in a row with identical input. Stop calling it and try a different approach.`
+    logEvent('tengu_doom_loop_blocked', {
+      toolName: sanitizeToolNameForAnalytics(tool.name),
+      count,
+    })
+    return [
+      {
+        message: createUserMessage({
+          content: [
+            {
+              type: 'tool_result',
+              content: warning,
+              is_error: true,
+              tool_use_id: toolUseID,
+            },
+          ],
+          toolUseResult: warning,
+          sourceToolAssistantUUID: assistantMessage.uuid,
+        }),
+      },
+    ]
+  }
+
   // Validate input types with zod (surprisingly, the model is not great at generating valid input)
   const parsedInput = tool.inputSchema.safeParse(normalizedInput)
   if (!parsedInput.success) {

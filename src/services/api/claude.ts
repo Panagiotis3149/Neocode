@@ -1357,6 +1357,42 @@ async function* queryModel(
     postNormalizedMessageCount: messagesForAPI.length,
   })
 
+  // Universal tool-history compression for the Anthropic-native transports.
+  // For firstParty / bedrock / vertex / github-native-anthropic, prompt
+  // caching keeps the system block hot, so we only need to compress when
+  // caching is OFF — otherwise compression would shrink context we're already
+  // caching cheaply. When caching is off, compression recovers context window
+  // just like it always did for generic providers.
+  const apiProvider = getAPIProvider()
+  const isAnthropicNativeTransport =
+    (apiProvider === 'firstParty' ||
+      apiProvider === 'bedrock' ||
+      apiProvider === 'vertex' ||
+      isGithubNativeAnthropicMode(options.model)) &&
+    !options.providerOverride
+  if (
+    isAnthropicNativeTransport &&
+    !getPromptCachingEnabled(options.model)
+  ) {
+    if (getGlobalConfig().toolHistoryCompressionEnabled) {
+      const { compressToolHistory } = await import('./compressToolHistory.js')
+      messagesForAPI = compressToolHistory(
+        messagesForAPI as unknown as Parameters<typeof compressToolHistory>[0],
+        options.model,
+        {
+          effectiveContextWindowSize: getContextWindowForModel(
+            options.model,
+            getSdkBetas(),
+          ),
+        },
+      ) as typeof messagesForAPI
+    } else {
+      logEvent('tengu_tool_history_compression_skipped', {
+        reason: 'disabled_by_config',
+      })
+    }
+  }
+
   // Compute fingerprint from first user message for attribution.
   // Must run BEFORE injecting synthetic messages (e.g. deferred tool names)
   // so the fingerprint reflects the actual user input.

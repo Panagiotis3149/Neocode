@@ -118,7 +118,11 @@ result = await Bun.build({
   format: 'esm',
   splitting: false,
   sourcemap: 'external',
-  minify: false,
+  // Whitespace+syntax only: identifier mangling would break the
+  // constructor.name matching in errors.ts/toolExecution.ts/useCanUseTool.
+  // The SDK build stays unminified — its React/Ink leak check greps import
+  // syntax that minification would rewrite.
+  minify: { whitespace: true, syntax: true, identifiers: false },
   naming: 'cli.mjs',
   define: {
     // MACRO.* build-time constants
@@ -438,6 +442,8 @@ export const createClaudeForChromeMcpServer = noop;
 const noop = () => null;
 export default noop;
 ${exports}
+const marker = JSON.stringify(\`missing-module-stub:${args.path}\`);
+;(globalThis.__openclaudeStubMarkers ??= []).push(marker);
 `,
               loader: 'js',
             }

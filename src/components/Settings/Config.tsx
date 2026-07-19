@@ -301,6 +301,25 @@ export function Config({
       });
     }
   }, {
+    id: 'compactTailTurns',
+    label: 'Auto-compact tail turns',
+    value: globalConfig.compactTailTurns ?? 3,
+    type: 'enum' as const,
+    options: [
+      { value: '1', label: '1 (minimal)' },
+      { value: '3', label: '3 (default)' },
+      { value: '5', label: '5' },
+      { value: '10', label: '10' },
+      { value: '20', label: '20 (keep more)' },
+      { value: '0', label: '0 (disable)' },
+    ],
+    onChange(mode) {
+      const compactTailTurns = Number(mode);
+      saveGlobalConfig(current => ({ ...current, compactTailTurns }));
+      setGlobalConfig({ ...getGlobalConfig(), compactTailTurns });
+      logEvent('tengu_compact_tail_turns_changed', { value: compactTailTurns });
+    }
+  }, {
     id: 'showCacheStats',
     label: 'Cache stats display',
     value: globalConfig.showCacheStats,
@@ -1191,6 +1210,10 @@ export function Config({
     }
     if (globalConfig.toolHistoryCompressionEnabled !== initialConfig.current.toolHistoryCompressionEnabled) {
       formattedChanges.push(`${globalConfig.toolHistoryCompressionEnabled ? 'Enabled' : 'Disabled'} tool history compression`);
+    }
+    if (globalConfig.compactTailTurns !== initialConfig.current.compactTailTurns) {
+      const turns = globalConfig.compactTailTurns ?? 3;
+      formattedChanges.push(`Set auto-compact tail turns to ${turns}`);
     }
     if (globalConfig.respectGitignore !== initialConfig.current.respectGitignore) {
       formattedChanges.push(`${globalConfig.respectGitignore ? 'Enabled' : 'Disabled'} respect .gitignore in file picker`);

@@ -626,3 +626,13 @@ test('extra block attributes (e.g. cache_control) preserved across rewrites', ()
   // The custom attribute survived the stub rewrite via ...block spread
   expect(block.cache_control).toEqual(cacheControl)
 })
+
+// ---------- idempotency ----------
+
+test('idempotent: second pass over compressed output is a no-op', () => {
+  const messages = buildConversation(20, 5_000)
+  const firstPass = compressToolHistoryForTest(messages, 'gpt-4o')
+  const secondPass = compressToolHistoryForTest(firstPass as any, 'gpt-4o')
+
+  expect(secondPass).toEqual(firstPass)
+})

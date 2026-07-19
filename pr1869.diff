@@ -1,0 +1,476 @@
+diff --git a/src/components/Settings/Config.tsx b/src/components/Settings/Config.tsx
+index 14f47d1345..cdb0ab7193 100644
+--- a/src/components/Settings/Config.tsx
++++ b/src/components/Settings/Config.tsx
+@@ -311,6 +311,27 @@ export function Config({
+         threshold: normalizedThreshold as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
+       });
+     }
++  }, {
++    id: 'compactTailTurns',
++    label: 'Compaction: recent messages kept',
++    value: String(globalConfig.compactTailTurns ?? 3),
++    // Include a hand-edited config value so it round-trips through the picker.
++    options: [...new Set(['2', '3', '5', '8', String(globalConfig.compactTailTurns ?? 3)])],
++    type: 'enum' as const,
++    onChange(compactTailTurnsValue: string) {
++      const compactTailTurns = Number(compactTailTurnsValue);
++      saveGlobalConfig(current => ({
++        ...current,
++        compactTailTurns
++      }));
++      setGlobalConfig({
++        ...getGlobalConfig(),
++        compactTailTurns
++      });
++      logEvent('tengu_compact_tail_turns_changed', {
++        value: compactTailTurnsValue as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
++      });
++    }
+   }, {
+     id: 'toolHistoryCompressionEnabled',
+     label: 'Tool history compression',
+@@ -1245,6 +1266,9 @@ export function Config({
+       const threshold = globalConfig.maxMessagesCompactionThreshold ?? 'off';
+       formattedChanges.push(threshold === 'off' ? 'Disabled message-count compaction' : `Set message-count compaction to ${threshold}`);
+     }
++    if (globalConfig.compactTailTurns !== initialConfig.current.compactTailTurns) {
++      formattedChanges.push(`Set compaction recent messages kept to ${globalConfig.compactTailTurns ?? 3}`);
++    }
+     if (globalConfig.toolHistoryCompressionEnabled !== initialConfig.current.toolHistoryCompressionEnabled) {
+       formattedChanges.push(`${globalConfig.toolHistoryCompressionEnabled ? 'Enabled' : 'Disabled'} tool history compression`);
+     }
+diff --git a/src/query.ts b/src/query.ts
+index 70cf690199..68d3c0489d 100644
+--- a/src/query.ts
++++ b/src/query.ts
+@@ -495,6 +495,12 @@ async function* queryLoop(
+   | ToolUseSummaryMessage,
+   Terminal
+ > {
++  // Reset this agent's doom loop detection at the start of each query turn.
++  // Keyed by agentId so a subagent starting mid-turn doesn't wipe the main
++  // thread's counter (or a sibling agent's).
++  const { resetDoomLoop } = await import('./utils/doomLoop.js')
++  resetDoomLoop(params.toolUseContext.agentId)
++
+   // Start a new turn for multi-turn context tracking
+   if (
+     feature('MULTI_TURN_CONTEXT') &&
+diff --git a/src/services/api/claude.ts b/src/services/api/claude.ts
+index fef0b3e6ba..99e0da7d09 100644
+--- a/src/services/api/claude.ts
++++ b/src/services/api/claude.ts
+@@ -1340,6 +1340,32 @@ async function* queryModel(
+ 
+   queryCheckpoint('query_tool_schema_build_end')
+ 
++  // Compress old tool outputs for Anthropic-native transports, but only when
++  // prompt caching is inactive. Rewriting old messages as they cross tier
++  // boundaries diverges the request prefix on every call, which breaks the
++  // prompt cache and costs more than the compression saves — cached native
++  // sessions rely on microCompact (cache-aware) instead. Shim-routed traffic
++  // (OpenAI-compatible env providers, per-agent providerOverride, Codex)
++  // compresses at its own layer, where the local fast-path opt-out applies.
++  // compressToolHistory is generic over AnyMessage — cast to satisfy the type
++  // checker since OpenClaude's Message union is a superset of what the
++  // function actually inspects.
++  const apiProvider = getAPIProvider()
++  const isAnthropicNativeTransport =
++    (apiProvider === 'firstParty' ||
++      apiProvider === 'bedrock' ||
++      apiProvider === 'vertex' ||
++      isGithubNativeAnthropicMode(options.model)) &&
++    !options.providerOverride
++  if (isAnthropicNativeTransport && !getPromptCachingEnabled(options.model)) {
++    const { compressToolHistory } = await import('./compressToolHistory.js')
++    messages = compressToolHistory(
++      messages as unknown as Parameters<typeof compressToolHistory>[0],
++      options.model,
++      { effectiveContextWindowSize: getContextWindowForModel(options.model, getSdkBetas()) },
++    ) as typeof messages
++  }
++
+   // Normalize messages before building system prompt (needed for fingerprinting)
+   // Instrumentation: Track message count before normalization
+   logEvent('tengu_api_before_normalize', {
+diff --git a/src/services/api/compressToolHistory.test.ts b/src/services/api/compressToolHistory.test.ts
+index 40dc0cbc61..9d0a6c0c70 100644
+--- a/src/services/api/compressToolHistory.test.ts
++++ b/src/services/api/compressToolHistory.test.ts
+@@ -634,3 +634,17 @@ test('extra block attributes (e.g. cache_control) preserved across rewrites', ()
+   // The custom attribute survived the stub rewrite via ...block spread
+   expect(block.cache_control).toEqual(cacheControl)
+ })
++
++test('idempotent: a second pass over compressed output is a no-op', () => {
++  // 16 exchanges at 100k window → old + mid + recent tiers all populated.
++  const messages = buildConversation(16)
++  const once = compressToolHistoryForTest(messages)
++  const twice = compressToolHistoryForTest(once)
++
++  // Stubs must not be re-stubbed (would corrupt the omitted-chars count) and
++  // truncations must not lose their marker — layered call sites (claude.ts +
++  // shim) rely on this.
++  expect(JSON.parse(JSON.stringify(twice))).toEqual(
++    JSON.parse(JSON.stringify(once)),
++  )
++})
+diff --git a/src/services/api/compressToolHistory.ts b/src/services/api/compressToolHistory.ts
+index 7eeab99c6d..8f6506c32d 100644
+--- a/src/services/api/compressToolHistory.ts
++++ b/src/services/api/compressToolHistory.ts
+@@ -16,9 +16,11 @@
+  *
+  * Reuses isCompactableTool from microCompact to avoid touching tools the
+  * project already classifies as unsafe to compress (e.g. Task, Agent).
+- * Skips blocks already cleared by microCompact (TOOL_RESULT_CLEARED_MESSAGE).
+- *
+- * Anthropic native bypasses both shims, so it is unaffected by this module.
++ * Skips blocks already cleared by microCompact (TOOL_RESULT_CLEARED_MESSAGE)
++ * and blocks this module already compressed (stub / truncation markers), so
++ * a second pass over the same messages is a no-op. That idempotence matters
++ * because claude.ts also calls this for Anthropic-native transports when
++ * prompt caching is inactive — layered call sites must not re-mangle output.
+  */
+ import { getEffectiveContextWindowSize } from '../compact/autoCompact.js'
+ import { isCompactableTool } from '../compact/microCompact.js'
+@@ -199,11 +201,24 @@ function isAlreadyCleared(block: ToolResultBlock): boolean {
+   return text === TOOL_RESULT_CLEARED_MESSAGE
+ }
+ 
++// Output of buildStub / truncateBlock from a previous pass. Re-stubbing a stub
++// replaces `→ 45000 chars omitted` with a misleading `→ 58 chars omitted`, and
++// re-truncating chops off the load-bearing truncation marker — so both are
++// skipped to keep compression idempotent across layered call sites.
++const STUB_MARKER_RE = /^\[[^\n]* args=[^\n]* → \d+ chars omitted\]$/
++const TRUNCATION_MARKER_RE = /\n\[…truncated \d+ chars from tool history\]$/
++
++function isAlreadyCompressed(block: ToolResultBlock): boolean {
++  const text = extractText(block.content)
++  return STUB_MARKER_RE.test(text) || TRUNCATION_MARKER_RE.test(text)
++}
++
+ function shouldCompressBlock(
+   block: ToolResultBlock,
+   toolUsesById: Map<string, ToolUseBlock>,
+ ): boolean {
+   if (isAlreadyCleared(block)) return false
++  if (isAlreadyCompressed(block)) return false
+   const toolUse = toolUsesById.get(block.tool_use_id ?? '')
+   // Unknown tool name (orphan tool_result with no matching tool_use) falls
+   // through to compression with a generic "tool" stub. Safer default: the
+diff --git a/src/services/compact/autoCompact.ts b/src/services/compact/autoCompact.ts
+index e93e760923..aaeaf305a8 100644
+--- a/src/services/compact/autoCompact.ts
++++ b/src/services/compact/autoCompact.ts
+@@ -451,9 +451,15 @@ export async function autoCompactIfNeeded(
+     const systemMessages = messages.filter(m => m.message?.role === 'system')
+     const nonSystemMessages = messages.filter(m => m.message?.role !== 'system')
+     
++    // Config may be hand-edited; anything that isn't a positive number
++    // falls back to the default rather than pruning the entire tail.
++    const configuredTailTurns = getGlobalConfig().compactTailTurns
+     const pruned = pruneByRelevance(nonSystemMessages, {
+       targetTokens: availableSpace,
+-      preserveRecent: 3,
++      preserveRecent:
++        configuredTailTurns && configuredTailTurns > 0
++          ? Math.floor(configuredTailTurns)
++          : 3,
+       preserveTools: true,
+       preserveErrors: true,
+     })
+diff --git a/src/services/tools/toolExecution.ts b/src/services/tools/toolExecution.ts
+index b1b0118ca8..c72f09d92c 100644
+--- a/src/services/tools/toolExecution.ts
++++ b/src/services/tools/toolExecution.ts
+@@ -67,6 +67,7 @@ import {
+   shouldCreateUserInterruptionMessage,
+ } from '../../utils/abortReasons.js'
+ import { logForDebugging } from '../../utils/debug.js'
++import { checkDoomLoop } from '../../utils/doomLoop.js'
+ import {
+   AbortError,
+   errorMessage,
+@@ -480,6 +481,30 @@ export async function* runToolUse(
+     return
+   }
+ 
++  // Doom loop detection: block after N consecutive identical tool calls.
++  // Keyed by agent so concurrent subagents don't pollute each other's counters.
++  const doomLoop = checkDoomLoop(toolName, toolUse.input, {
++    agentKey: toolUseContext.agentId,
++  })
++  if (doomLoop.blocked) {
++    logForDebugging(`Doom loop detected for ${toolName} (${doomLoop.count} consecutive identical calls)`)
++    yield {
++      message: createUserMessage({
++        content: [
++          {
++            type: 'tool_result',
++            content: `<tool_use_error>Blocked: This tool has been called ${doomLoop.count} times in a row with identical input. You are likely in a loop. Please try a different approach or ask the user for help.</tool_use_error>`,
++            is_error: true,
++            tool_use_id: toolUse.id,
++          },
++        ],
++        toolUseResult: `Blocked: doom loop detected for ${toolName} after ${doomLoop.count} identical calls`,
++        sourceToolAssistantUUID: assistantMessage.uuid,
++      }),
++    }
++    return
++  }
++
+   const toolInput = toolUse.input as { [key: string]: string }
+   try {
+     if (toolUseContext.abortController.signal.aborted) {
+diff --git a/src/utils/config.ts b/src/utils/config.ts
+index 09b00696e9..b75fd11b99 100644
+--- a/src/utils/config.ts
++++ b/src/utils/config.ts
+@@ -285,7 +285,8 @@ export type GlobalConfig = {
+   hasUsedBackslashReturn?: boolean
+   autoCompactEnabled: boolean // Controls whether auto-compact is enabled
+   contextCollapseEnabled: boolean // Opt-in: collapse old transcript spans into summaries (lossy; off by default)
+-  toolHistoryCompressionEnabled: boolean // Compress old tool_result content for small-context providers
++  toolHistoryCompressionEnabled: boolean // Compress old tool_result content (shim providers; Anthropic-native only while prompt caching is inactive)
++  compactTailTurns?: number // Recent messages preserved verbatim by auto-compact's relevance pruning (default: 3)
+   showTurnDuration: boolean // Controls whether to show turn duration message (e.g., "Cooked for 1m 6s")
+   // Controls whether to show per-query cache hit/miss stats at the end of each turn.
+   // 'off'     — no display
+@@ -761,6 +762,7 @@ export const GLOBAL_CONFIG_KEYS = [
+   'editorMode',
+   'hasUsedBackslashReturn',
+   'autoCompactEnabled',
++  'compactTailTurns',
+   'contextCollapseEnabled',
+   'toolHistoryCompressionEnabled',
+   'showTurnDuration',
+diff --git a/src/utils/doomLoop.test.ts b/src/utils/doomLoop.test.ts
+new file mode 100644
+index 0000000000..4079661ee0
+--- /dev/null
++++ b/src/utils/doomLoop.test.ts
+@@ -0,0 +1,119 @@
++import { describe, it, expect, beforeEach } from 'bun:test'
++import {
++  checkDoomLoop,
++  resetDoomLoop,
++  resetAllDoomLoops,
++  getDoomLoopState,
++} from './doomLoop.js'
++
++describe('doomLoop', () => {
++  beforeEach(() => {
++    resetAllDoomLoops()
++  })
++
++  it('allows first call', () => {
++    const result = checkDoomLoop('Bash', { command: 'ls' })
++    expect(result.blocked).toBe(false)
++    expect(result.count).toBe(1)
++  })
++
++  it('allows second identical call', () => {
++    checkDoomLoop('Bash', { command: 'ls' })
++    const result = checkDoomLoop('Bash', { command: 'ls' })
++    expect(result.blocked).toBe(false)
++    expect(result.count).toBe(2)
++  })
++
++  it('blocks third identical call by default', () => {
++    checkDoomLoop('Bash', { command: 'ls' })
++    checkDoomLoop('Bash', { command: 'ls' })
++    const result = checkDoomLoop('Bash', { command: 'ls' })
++    expect(result.blocked).toBe(true)
++    expect(result.count).toBe(3)
++  })
++
++  it('resets when a different tool/input is called', () => {
++    checkDoomLoop('Bash', { command: 'ls' })
++    checkDoomLoop('Bash', { command: 'ls' })
++    // Different tool
++    const result = checkDoomLoop('Grep', { pattern: 'foo' })
++    expect(result.blocked).toBe(false)
++    expect(result.count).toBe(1)
++  })
++
++  it('resets when same tool has different input', () => {
++    checkDoomLoop('Bash', { command: 'ls' })
++    checkDoomLoop('Bash', { command: 'ls' })
++    const result = checkDoomLoop('Bash', { command: 'pwd' })
++    expect(result.blocked).toBe(false)
++    expect(result.count).toBe(1)
++  })
++
++  it('respects custom threshold', () => {
++    checkDoomLoop('Bash', { command: 'ls' }, { threshold: 5 })
++    checkDoomLoop('Bash', { command: 'ls' }, { threshold: 5 })
++    checkDoomLoop('Bash', { command: 'ls' }, { threshold: 5 })
++    const result = checkDoomLoop('Bash', { command: 'ls' }, { threshold: 5 })
++    expect(result.blocked).toBe(false)
++    expect(result.count).toBe(4)
++    const blocked = checkDoomLoop('Bash', { command: 'ls' }, { threshold: 5 })
++    expect(blocked.blocked).toBe(true)
++    expect(blocked.count).toBe(5)
++  })
++
++  it('reset clears state for the main agent', () => {
++    checkDoomLoop('Bash', { command: 'ls' })
++    checkDoomLoop('Bash', { command: 'ls' })
++    resetDoomLoop()
++    const result = checkDoomLoop('Bash', { command: 'ls' })
++    expect(result.blocked).toBe(false)
++    expect(result.count).toBe(1)
++  })
++
++  it('tracks agents independently', () => {
++    // Three "agents" each make the same call once — interleaved they must
++    // not trip the shared-counter block.
++    expect(checkDoomLoop('Read', { file: 'a' }, { agentKey: 'agent-1' }).count).toBe(1)
++    expect(checkDoomLoop('Read', { file: 'a' }, { agentKey: 'agent-2' }).count).toBe(1)
++    const third = checkDoomLoop('Read', { file: 'a' }, { agentKey: 'agent-3' })
++    expect(third.blocked).toBe(false)
++    expect(third.count).toBe(1)
++  })
++
++  it('interleaved calls from another agent do not reset the counter', () => {
++    checkDoomLoop('Bash', { command: 'ls' })
++    checkDoomLoop('Grep', { pattern: 'x' }, { agentKey: 'agent-1' })
++    checkDoomLoop('Bash', { command: 'ls' })
++    const result = checkDoomLoop('Bash', { command: 'ls' })
++    expect(result.blocked).toBe(true)
++    expect(result.count).toBe(3)
++  })
++
++  it('resetting one agent leaves others intact', () => {
++    checkDoomLoop('Bash', { command: 'ls' })
++    checkDoomLoop('Bash', { command: 'ls' })
++    checkDoomLoop('Bash', { command: 'ls' }, { agentKey: 'agent-1' })
++    checkDoomLoop('Bash', { command: 'ls' }, { agentKey: 'agent-1' })
++    resetDoomLoop('agent-1')
++    // agent-1 restarts from scratch
++    expect(checkDoomLoop('Bash', { command: 'ls' }, { agentKey: 'agent-1' }).count).toBe(1)
++    // main still one call away from the block
++    const main = checkDoomLoop('Bash', { command: 'ls' })
++    expect(main.blocked).toBe(true)
++    expect(main.count).toBe(3)
++  })
++
++  it('getDoomLoopState returns current state', () => {
++    checkDoomLoop('Bash', { command: 'ls' })
++    const state = getDoomLoopState()
++    expect(state.consecutiveCount).toBe(1)
++    expect(state.blocked).toBe(false)
++    expect(state.lastSignature).toContain('Bash')
++  })
++
++  it('getDoomLoopState is per-agent', () => {
++    checkDoomLoop('Bash', { command: 'ls' }, { agentKey: 'agent-1' })
++    expect(getDoomLoopState('agent-1').consecutiveCount).toBe(1)
++    expect(getDoomLoopState().consecutiveCount).toBe(0)
++  })
++})
+diff --git a/src/utils/doomLoop.ts b/src/utils/doomLoop.ts
+new file mode 100644
+index 0000000000..86e6131e85
+--- /dev/null
++++ b/src/utils/doomLoop.ts
+@@ -0,0 +1,97 @@
++/**
++ * Doom loop detection: prevents wasting tokens on repeated identical tool calls.
++ *
++ * Tracks consecutive tool calls with the same (name, input) signature.
++ * After a configurable threshold (default 3), blocks execution and tells the
++ * model to change approach or ask the user.
++ *
++ * State is keyed per agent (main thread and each subagent track separately).
++ * Subagents run runToolUse in the same process as the main loop, so a shared
++ * counter would let three parallel agents each legitimately making the same
++ * call once trip the block, and any interleaved call would reset it.
++ */
++
++const DEFAULT_THRESHOLD = 3
++
++const MAIN_AGENT_KEY = 'main'
++
++type ToolSignature = string
++
++interface DoomLoopState {
++  lastSignature: ToolSignature | null
++  consecutiveCount: number
++  blocked: boolean
++}
++
++const stateByAgent = new Map<string, DoomLoopState>()
++
++function getState(agentKey: string): DoomLoopState {
++  let state = stateByAgent.get(agentKey)
++  if (!state) {
++    state = { lastSignature: null, consecutiveCount: 0, blocked: false }
++    stateByAgent.set(agentKey, state)
++  }
++  return state
++}
++
++function computeSignature(toolName: string, input: unknown): ToolSignature {
++  // Use a stable JSON serialization for the input.
++  // Truncate to avoid hashing huge inputs — first 2K chars is enough
++  // to detect identical calls.
++  const inputStr = typeof input === 'string'
++    ? input
++    : JSON.stringify(input) ?? ''
++  return `${toolName}::${inputStr.slice(0, 2048)}`
++}
++
++/**
++ * Record a tool call and check if it's a doom loop.
++ * Returns `{ blocked: true }` if the tool should be blocked,
++ * or `{ blocked: false }` to proceed normally.
++ */
++export function checkDoomLoop(
++  toolName: string,
++  input: unknown,
++  options: { threshold?: number; agentKey?: string } = {},
++): { blocked: boolean; count: number } {
++  const threshold = options.threshold ?? DEFAULT_THRESHOLD
++  const state = getState(options.agentKey ?? MAIN_AGENT_KEY)
++  const sig = computeSignature(toolName, input)
++
++  if (sig === state.lastSignature) {
++    state.consecutiveCount++
++  } else {
++    state.lastSignature = sig
++    state.consecutiveCount = 1
++    state.blocked = false
++  }
++
++  if (state.consecutiveCount >= threshold && !state.blocked) {
++    state.blocked = true
++    return { blocked: true, count: state.consecutiveCount }
++  }
++
++  return { blocked: state.blocked, count: state.consecutiveCount }
++}
++
++/**
++ * Reset doom loop state for one agent (e.g., at the start of its query turn).
++ * Defaults to the main thread, matching checkDoomLoop's default key.
++ */
++export function resetDoomLoop(agentKey: string = MAIN_AGENT_KEY): void {
++  stateByAgent.delete(agentKey)
++}
++
++/** Clear every agent's state. Test isolation only. */
++export function resetAllDoomLoops(): void {
++  stateByAgent.clear()
++}
++
++/**
++ * Get current doom loop state for diagnostics.
++ */
++export function getDoomLoopState(
++  agentKey: string = MAIN_AGENT_KEY,
++): Readonly<DoomLoopState> {
++  return { ...getState(agentKey) }
++}

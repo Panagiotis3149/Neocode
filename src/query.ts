@@ -116,6 +116,7 @@ import type { Terminal, Continue } from './query/transitions.js'
 import { feature } from 'bun:bundle'
 import {
   getCurrentTurnTokenBudget,
+  getCurrentTurnTokenBudgetMode,
   getTurnOutputTokens,
   incrementBudgetContinuationCount,
 } from './bootstrap/state.js'
@@ -303,6 +304,13 @@ async function* queryLoop(
     skipCacheWrite,
   } = params
   const deps = params.deps ?? productionDeps()
+
+  // Reset doom-loop detection counters for this agent at the start of a fresh
+  // query loop, so a previous conversation's runaway tool won't still be blocked.
+  {
+    const { resetDoomLoop } = await import('./utils/doomLoop.js')
+    resetDoomLoop(params.toolUseContext.agentId)
+  }
 
   // Mutable cross-iteration state. The loop body destructures this at the top
   // of each iteration so reads stay bare-name (`messages`, `toolUseContext`).
@@ -1596,6 +1604,7 @@ async function* queryLoop(
           toolUseContext.agentId,
           getCurrentTurnTokenBudget(),
           getTurnOutputTokens(),
+          getCurrentTurnTokenBudgetMode(),
         )
 
         if (decision.action === 'continue') {

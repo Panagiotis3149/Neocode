@@ -14,6 +14,7 @@ import type {
 } from '../services/oauth/types.js'
 import { getCwd } from '../utils/cwd.js'
 import { registerCleanup } from './cleanupRegistry.js'
+import { createDeferredWriter } from './deferredConfigWrites.js'
 import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
 import { getGlobalClaudeFile } from './env.js'
@@ -286,7 +287,8 @@ export type GlobalConfig = {
   hasUsedBackslashReturn?: boolean
   autoCompactEnabled: boolean // Controls whether auto-compact is enabled
   contextCollapseEnabled: boolean // Opt-in: collapse old transcript spans into summaries (lossy; off by default)
-  toolHistoryCompressionEnabled: boolean // Compress old tool_result content for small-context providers
+  toolHistoryCompressionEnabled: boolean // Compress old tool_result content (shim providers; Anthropic-native only while prompt caching is inactive)
+  compactTailTurns?: number // Recent messages preserved verbatim by auto-compact's relevance pruning (default: 3)
   showTurnDuration: boolean // Controls whether to show turn duration message (e.g., "Cooked for 1m 6s")
   // Controls whether to show per-query cache hit/miss stats at the end of each turn.
   // 'off'     — no display
@@ -774,6 +776,7 @@ export const GLOBAL_CONFIG_KEYS = [
   'autoCompactEnabled',
   'contextCollapseEnabled',
   'toolHistoryCompressionEnabled',
+  'compactTailTurns',
   'showTurnDuration',
   'showCacheStats',
   'diffTool',
@@ -917,7 +920,12 @@ var testProjectConfigForTesting: ProjectConfig | undefined
 function getTestGlobalConfigForTesting(): GlobalConfig {
   if (!testGlobalConfigForTesting) {
     testGlobalConfigForTesting = {
-      ...DEFAULT_GLOBAL_CONFIG,
+      // Spread the hoisted factory rather than the `const DEFAULT_GLOBAL_CONFIG`:
+      // client.ts calls getGlobalConfig() at module top-level, and during cyclic
+      // test import graphs a back-edge can reach this before the const is
+      // initialized (TDZ → ReferenceError). createDefaultGlobalConfig is a
+      // function declaration, so it is always safe to call here.
+      ...createDefaultGlobalConfig(),
       autoUpdates: false,
       knowledgeGraphEnabled: true,
     }
@@ -972,6 +980,15 @@ export function saveGlobalConfig(
     Object.assign(current, config)
     return
   }
+
+  // Apply any queued deferred writes first. A direct save re-reads the on-disk
+  // config and write-throughs that snapshot into globalConfigCache; without
+  // draining the deferred queue first, that snapshot would drop the pending
+  // counter deltas the cache is holding and same-process readers would observe
+  // stale values until the debounce fires. flushGlobalConfigWrites() is a no-op
+  // when nothing is queued, and the drain empties the queue before its own
+  // saveGlobalConfig runs, so this recurses at most one level.
+  flushGlobalConfigWrites()
 
   let written: GlobalConfig | null = null
   try {
@@ -1037,6 +1054,57 @@ export function saveGlobalConfig(
     saveConfig(getGlobalClaudeFile(), written, DEFAULT_GLOBAL_CONFIG)
     writeThroughGlobalConfigCache(written)
   }
+}
+
+// Coalesced (debounced) global-config writer.
+//
+// saveGlobalConfig does a synchronous lockfile acquire + full re-read + backup
+// copy + fsync on every call, which stalls the event loop (and drops frames)
+// when several low-stakes writes land back-to-back. saveGlobalConfigDeferred
+// queues the updater, write-throughs the in-memory cache immediately so
+// same-process reads stay coherent, and folds all pending updaters into a
+// single locked saveGlobalConfig on a trailing debounce. The auth-loss guard,
+// lockfile and backup all remain on saveGlobalConfig's disk path — this only
+// batches WHEN the disk write happens, never how. Do NOT route auth, onboarding
+// or migration writes through it (see GH #3117); it is for idempotent,
+// loss-tolerant counters/flags only.
+const CONFIG_FLUSH_DEBOUNCE_MS = 500
+
+// The queue/debounce/write-through/batch-drain logic lives in a generic,
+// disk-free engine (see deferredConfigWrites.ts) so it can be unit-tested with
+// injected storage/scheduler. Here we wire the real saveGlobalConfig, in-memory
+// cache, and timers into it.
+const globalConfigDeferredWriter = createDeferredWriter<
+  GlobalConfig,
+  ReturnType<typeof setTimeout>
+>({
+  debounceMs: CONFIG_FLUSH_DEBOUNCE_MS,
+  save: updater => saveGlobalConfig(updater),
+  readCache: () => globalConfigCache.config,
+  writeThrough: next => writeThroughGlobalConfigCache(next),
+  setTimer: (fn, ms) => {
+    const timer = setTimeout(fn, ms)
+    // A pending config flush must never hold the process open on its own.
+    timer.unref?.()
+    return timer
+  },
+  clearTimer: timer => clearTimeout(timer),
+})
+
+export function saveGlobalConfigDeferred(
+  updater: (currentConfig: GlobalConfig) => GlobalConfig,
+): void {
+  // Keep tests synchronous and observable, matching saveGlobalConfig.
+  if (process.env.NODE_ENV === 'test') {
+    saveGlobalConfig(updater)
+    return
+  }
+  globalConfigDeferredWriter.defer(updater)
+}
+
+/** Force any queued deferred global-config writes to disk now. */
+export function flushGlobalConfigWrites(): void {
+  globalConfigDeferredWriter.flush()
 }
 
 // Cache for global config

@@ -3,7 +3,7 @@ import { c as _c } from "react-compiler-runtime";
 import { feature } from 'bun:bundle';
 import { spawnSync } from 'child_process';
 import { snapshotOutputTokensForTurn, getCurrentTurnTokenBudget, getTurnOutputTokens, getBudgetContinuationCount, getTotalInputTokens } from '../bootstrap/state.js';
-import { parseTokenBudget } from '../utils/tokenBudget.js';
+import { parseTokenBudgetWithMode } from '../utils/tokenBudget.js';
 import { count } from '../utils/array.js';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
@@ -71,6 +71,7 @@ import { useMoreRight } from '../moreright/useMoreRight.js';
 import { SpinnerWithVerb, BriefIdleStatus, type SpinnerMode } from '../components/Spinner.js';
 import { getSystemPrompt } from '../constants/prompts.js';
 import { buildEffectiveSystemPrompt } from '../utils/systemPrompt.js';
+import { getAutoNewModeSystemPrompt } from '../utils/permissions/autoNewSystemPrompt.js';
 import { getSystemContext, getUserContext } from '../context.js';
 import { getMemoryFiles } from '../utils/claudemd.js';
 import { startBackgroundHousekeeping } from '../utils/backgroundHousekeeping.js';
@@ -131,7 +132,7 @@ import { WEB_FETCH_TOOL_NAME } from '../tools/WebFetchTool/prompt.js';
 import { SLEEP_TOOL_NAME } from '../tools/SleepTool/prompt.js';
 import { clearSpeculativeChecks } from '../tools/BashTool/bashPermissions.js';
 import type { AutoUpdaterResult } from '../utils/autoUpdater.js';
-import { getGlobalConfig, saveGlobalConfig, getGlobalConfigWriteCount } from '../utils/config.js';
+import { getGlobalConfig, saveGlobalConfig, saveGlobalConfigDeferred, getGlobalConfigWriteCount } from '../utils/config.js';
 import { hasConsoleBillingAccess } from '../utils/billing.js';
 import { logEvent, type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from 'src/services/analytics/index.js';
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js';
@@ -208,6 +209,7 @@ const useProactive = feature('PROACTIVE') || feature('KAIROS') ? require('../pro
 const useScheduledTasks = require('../hooks/useScheduledTasks.js').useScheduledTasks;
 /* eslint-enable @typescript-eslint/no-require-imports */
 import { isAgentSwarmsEnabled } from '../utils/agentSwarmsEnabled.js';
+import { decideStreamingTextUpdate } from './streamingTextPublish.js';
 import { useTaskListWatcher } from '../hooks/useTaskListWatcher.js';
 import type { SandboxAskCallback, NetworkHostPattern } from '../utils/sandbox/sandbox-adapter.js';
 import { type IDEExtensionInstallationStatus, closeOpenDiffs, getConnectedIdeClient, type IdeType } from '../utils/ide.js';
@@ -651,6 +653,7 @@ export function REPL({
   const ultraplanPendingChoice = useAppState(s => s.ultraplanPendingChoice);
   const ultraplanLaunchPending = useAppState(s => s.ultraplanLaunchPending);
   const viewingAgentTaskId = useAppState(s => s.viewingAgentTaskId);
+  const pendingAutoNewAttention = useAppState(s => s.pendingAutoNewAttention);
   const setAppState = useSetAppState();
   const autoCompactTrackingBySessionRef = useRef(new Map<ReturnType<typeof getSessionId>, AutoCompactTrackingState>());
   const getAutoCompactTrackingForSession = useCallback((sessionId: ReturnType<typeof getSessionId>) => autoCompactTrackingBySessionRef.current.get(sessionId), []);
@@ -1186,6 +1189,17 @@ export function REPL({
     reject: (error: Error) => void;
   }>>([]);
 
+  // Drive the lightweight amber "ATTENTION" banner in Auto (New) mode: it should
+  // light up only while a permission prompt is actually awaiting the user.
+  useEffect(() => {
+    const shouldFlag =
+      toolUseConfirmQueue.length > 0 &&
+      toolPermissionContext.mode === 'autoNew'
+    if (pendingAutoNewAttention !== shouldFlag) {
+      setAppState(prev => ({ ...prev, pendingAutoNewAttention: shouldFlag }))
+    }
+  }, [toolUseConfirmQueue, toolPermissionContext.mode, pendingAutoNewAttention])
+
   // Track bridge cleanup functions for sandbox permission requests so the
   // local dialog handler can cancel the remote prompt when the local user
   // responds first. Keyed by host to support concurrent same-host requests.
@@ -1555,15 +1569,43 @@ export function REPL({
   }, []);
 
   // Streaming text display: set state directly per delta (Ink's 16ms render
-  // throttle batches rapid updates). Cleared on message arrival (messages.ts)
-  // so displayedMessages switches from deferredMessages to messages atomically.
+  // Streaming text display. streamingTextRef holds the full accumulated text
+  // (so callers like the Esc handler can read the complete partial output),
+  // while streamingText state is only published up to the last completed
+  // newline. decideStreamingTextUpdate collapses rapid char deltas into
+  // line-by-line React repaints instead of one per character.
   const [streamingText, setStreamingText] = useState<string | null>(null);
+  const streamingTextRef = useRef<string | null>(null);
+  const lastFlushedStreamingVisibleRef = useRef<string | null>(null);
   const reducedMotion = useAppState(s => s.settings.prefersReducedMotion) ?? false;
   const showStreamingText = !reducedMotion && !hasCursorUpViewportYankBug();
   const onStreamingText = useCallback((f: (current: string | null) => string | null) => {
     if (!showStreamingText) return;
-    setStreamingText(f);
+    streamingTextRef.current = f(streamingTextRef.current);
+    const next = decideStreamingTextUpdate(streamingTextRef.current, lastFlushedStreamingVisibleRef.current);
+    if (next !== null) {
+      lastFlushedStreamingVisibleRef.current = next;
+      setStreamingText(next);
+    }
   }, [showStreamingText]);
+
+  // Esc handler reads the ref, not state, so it captures text still mid-line
+  // (state only holds completed lines). Exposed so the interrupt path can pull
+  // the full partial response even when it hasn't been published yet.
+  function flushStreamingTextRef(): string | null {
+    const refText = streamingTextRef.current;
+    if (refText == null) return null;
+    const withNewline = refText.endsWith('\n') ? refText : refText + '\n';
+    const flushed = decideStreamingTextUpdate(
+      withNewline,
+      lastFlushedStreamingVisibleRef.current,
+    );
+    if (flushed !== null) {
+      lastFlushedStreamingVisibleRef.current = flushed.replace(/\n$/, '');
+      setStreamingText(lastFlushedStreamingVisibleRef.current);
+    }
+    return streamingTextRef.current;
+  }
 
   // Hide the in-progress source line so text streams line-by-line, not
   // char-by-char. lastIndexOf returns -1 when no newline, giving '' → null.
@@ -1722,7 +1764,7 @@ export function REPL({
       if (count >= 3) return;
       const timer = setTimeout((ref, setMessages) => {
         ref.current = true;
-        saveGlobalConfig(prev => {
+        saveGlobalConfigDeferred(prev => {
           const prevCount = prev.autoPermissionsNotificationCount ?? 0;
           if (prevCount >= 3) return prev;
           return {
@@ -2233,9 +2275,10 @@ export function REPL({
     // generated before pressing Esc. Pushed before resetLoadingState clears
     // streamingText, and before query.ts yields the async interrupt marker,
     // giving final order [user, partial-assistant, [Request interrupted by user]].
-    if (streamingText?.trim()) {
+    const partialStreamingResponse = flushStreamingTextRef()?.trim();
+    if (partialStreamingResponse) {
       setMessages(prev => [...prev, createAssistantMessage({
-        content: streamingText
+        content: partialStreamingResponse
       })]);
     }
     resetLoadingState();
@@ -2676,7 +2719,9 @@ export function REPL({
         toolUseContext,
         customSystemPrompt,
         defaultSystemPrompt,
-        appendSystemPrompt
+        appendSystemPrompt: toolPermissionContext.mode === 'autoNew'
+          ? [appendSystemPrompt, getAutoNewModeSystemPrompt()].filter(Boolean).join('\n\n')
+          : appendSystemPrompt
       });
       toolUseContext.renderedSystemPrompt = systemPrompt;
       const notificationAttachments = await getQueuedCommandAttachments(removedNotifications).catch(() => []);
@@ -2928,7 +2973,9 @@ export function REPL({
       toolUseContext,
       customSystemPrompt,
       defaultSystemPrompt,
-      appendSystemPrompt
+      appendSystemPrompt: toolPermissionContext.mode === 'autoNew'
+        ? [appendSystemPrompt, getAutoNewModeSystemPrompt()].filter(Boolean).join('\n\n')
+        : appendSystemPrompt
     });
     toolUseContext.renderedSystemPrompt = systemPrompt;
     queryCheckpoint('query_query_start');
@@ -3050,8 +3097,11 @@ export function REPL({
       setMessages(oldMessages => [...oldMessages, ...newMessages]);
       responseLengthRef.current = 0;
       if (feature('TOKEN_BUDGET')) {
-        const parsedBudget = input ? parseTokenBudget(input) : null;
-        snapshotOutputTokensForTurn(parsedBudget ?? getCurrentTurnTokenBudget());
+        const parsedBudget = input ? parseTokenBudgetWithMode(input) : null;
+        snapshotOutputTokensForTurn(
+          parsedBudget ? parsedBudget.budget : getCurrentTurnTokenBudget(),
+          parsedBudget ? parsedBudget.mode : 'target',
+        );
       }
       apiMetricsRef.current = [];
       setStreamingToolUses([]);
@@ -3373,7 +3423,14 @@ export function REPL({
         });
         idleHintShownRef.current = false;
       }
-      const shouldTreatAsImmediate = queryGuard.isActive && (matchingCommand?.immediate || options?.fromKeybinding);
+      // Local-jsx commands only mount interactive UI (e.g. the /effort picker)
+      // and never enqueue a query, so they must run immediately regardless of
+      // whether a query is active. The previous `queryGuard.isActive` gate made
+      // them fall through to the async non-immediate fallback when the prompt
+      // was idle, which could drop the picker. Keybinding-triggered commands
+      // (options.fromKeybinding) also run immediately.
+      const shouldTreatAsImmediate =
+        !!matchingCommand?.immediate || !!options?.fromKeybinding;
       if (matchingCommand && shouldTreatAsImmediate && matchingCommand.type === 'local-jsx') {
         // Only clear input if the submitted text matches what's in the prompt.
         // When a command keybinding fires, input is "/<command>" but the actual
@@ -4033,7 +4090,7 @@ export function REPL({
     }
     if (hasCountedQueueUseRef.current) return;
     hasCountedQueueUseRef.current = true;
-    saveGlobalConfig(current => ({
+    saveGlobalConfigDeferred(current => ({
       ...current,
       promptQueueUseCount: (current.promptQueueUseCount ?? 0) + 1
     }));

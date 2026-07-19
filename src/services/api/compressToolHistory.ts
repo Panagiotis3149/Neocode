@@ -97,6 +97,19 @@ function extractText(content: unknown): string {
   return ''
 }
 
+// Markers written by our own passes. A second pass over already-compressed
+// output must be a no-op, or compression would compound (buildStub over a
+// stub, etc.) and drift from the reference behavior the tests assert.
+const STUB_MARKER_RE =
+  /^\[[^\n]* args=[^\n]* → \d+ chars omitted\]$/
+const TRUNCATION_MARKER_RE =
+  /\n\[…truncated \d+ chars from tool history\]$/
+
+function isAlreadyCompressed(block: ToolResultBlock): boolean {
+  const text = extractText(block.content)
+  return STUB_MARKER_RE.test(text) || TRUNCATION_MARKER_RE.test(text)
+}
+
 // Old-tier compression strategy. Replaces content entirely with a one-line
 // metadata marker ~10× more token-efficient than a 500-char truncation AND
 // unambiguous — partial truncations can look authoritative to the model. The
@@ -204,6 +217,7 @@ function shouldCompressBlock(
   toolUsesById: Map<string, ToolUseBlock>,
 ): boolean {
   if (isAlreadyCleared(block)) return false
+  if (isAlreadyCompressed(block)) return false
   const toolUse = toolUsesById.get(block.tool_use_id ?? '')
   // Unknown tool name (orphan tool_result with no matching tool_use) falls
   // through to compression with a generic "tool" stub. Safer default: the
