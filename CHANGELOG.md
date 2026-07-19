@@ -3,6 +3,20 @@
 All notable changes to Neocode are documented in this file. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.0.0 (2026-07-19)
+
+
+### Features
+
+* add /skid (skidding) bundled skill ([d2f882b](https://github.com/Panagiotis3149/Neocode/commit/d2f882b39b39fa8affeb607bb2a1427bf4cf5f90))
+* commit remaining unpushed work (autoNew, effort, orphan reaper, skid tooling) ([168fb91](https://github.com/Panagiotis3149/Neocode/commit/168fb91bf7596dcb9122e75d97ff89a3d5c1e743))
+* wire /skid (skidding) skill into bundled registration ([c81ca8e](https://github.com/Panagiotis3149/Neocode/commit/c81ca8e2cab738ccea5842a9036704ca1e76de69))
+
+
+### Performance Improvements
+
+* skid 5 upstream performance-fix PRs (1478, 1743, 1744, 1869, 1948) ([38fc724](https://github.com/Panagiotis3149/Neocode/commit/38fc7248b22ab689837b6ccaecdcda28ed0da4cb))
+
 ## [0.18.2] - 2026-07-19
 
 ### Performance

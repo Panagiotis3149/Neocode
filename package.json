@@ -1,6 +1,6 @@
 {
   "name": "@panagiotis3149/neocode",
-  "version": "0.18.0",
+  "version": "1.0.0",
   "description": "Neocode opens coding-agent workflows to any LLM — OpenAI, Gemini, DeepSeek, Ollama, and 200+ models",
   "type": "module",
   "bin": {
