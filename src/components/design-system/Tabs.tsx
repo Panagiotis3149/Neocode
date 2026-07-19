@@ -195,17 +195,66 @@ export function Tabs(t0) {
   const usedWidth = titleWidth + tabsWidth;
   const spacerWidth = useFullWidth ? Math.max(0, terminalWidth - usedWidth) : 0;
   const contentWidth = useFullWidth ? terminalWidth : undefined;
+  // When the tab strip is wider than the terminal, scroll a window so the
+  // selected tab (and the Auto (New) tab at the end) stays reachable instead
+  // of being clipped off the right edge. `‹`/`›` indicate off-screen tabs.
+  const indicatorWidth = 2;
+  const availableForTabs = Math.max(0, terminalWidth - titleWidth - indicatorWidth);
+  let scrollStart = 0;
+  let scrollEnd = tabs.length;
+  if (tabsWidth > availableForTabs) {
+    let remaining = availableForTabs;
+    let left = selectedTabIndex;
+    let right = selectedTabIndex;
+    // Expand the window around the selected tab until it can't grow further.
+    const widthAt = i => (i >= 0 && i < tabs.length ? (tabs[i][1] ? stringWidth(tabs[i][1]) : 0) + 3 : 0);
+    remaining -= widthAt(selectedTabIndex);
+    while (true) {
+      const canLeft = left > 0 && remaining - widthAt(left - 1) >= 0;
+      const canRight = right < tabs.length - 1 && remaining - widthAt(right + 1) >= 0;
+      if (canLeft && !canRight) {
+        remaining -= widthAt(left - 1);
+        left--;
+      } else if (canRight && !canLeft) {
+        remaining -= widthAt(right + 1);
+        right++;
+      } else if (canLeft && canRight) {
+        // Prefer keeping the most-recently added (rightmost) tabs visible.
+        remaining -= widthAt(right + 1);
+        right++;
+      } else {
+        break;
+      }
+    }
+    scrollStart = left;
+    scrollEnd = right + 1;
+    // Guarantee the rightmost tab (e.g. "Auto (New)") is always reachable,
+    // even when the selected tab sits on the far left of a narrow strip.
+    if (scrollEnd < tabs.length) {
+      scrollEnd = tabs.length;
+      // Shift the window start right so it still fits, dropping leftmost tabs
+      // first. Keep the selected tab visible when it fits within the window.
+      while (
+        scrollStart < scrollEnd - 1 &&
+        tabs.slice(scrollStart, scrollEnd).reduce((sum, t) => sum + (t[1] ? stringWidth(t[1]) : 0) + 3, 0) >
+          availableForTabs
+      ) {
+        scrollStart++;
+      }
+    }
+  }
   const T0 = Box;
   const t11 = "column";
   const t12 = 0;
   const t13 = true;
   const t14 = modalScrollRef ? 0 : undefined;
-  const t15 = !hidden && <Box key={`${selectedTabIndex}-${headerFocused ? "focused" : "blurred"}`} flexDirection="row" gap={1} flexShrink={modalScrollRef ? 0 : undefined}>{title !== undefined && <Text bold={true} color={color}>{title}</Text>}{tabs.map((t16, i) => {
+  const t15 = !hidden && <Box key={`${selectedTabIndex}-${headerFocused ? "focused" : "blurred"}`} flexDirection="row" gap={1} flexShrink={modalScrollRef ? 0 : undefined}>{title !== undefined && <Text bold={true} color={color}>{title}</Text>}{(scrollStart > 0 || scrollEnd < tabs.length) && <Text dimColor={true}>‹</Text>}{tabs.slice(scrollStart, scrollEnd).map((t16, i) => {
+      const realIndex = scrollStart + i;
       const [id, title_0] = t16;
-      const isCurrent = selectedTabIndex === i;
+      const isCurrent = selectedTabIndex === realIndex;
       const hasColorCursor = color && isCurrent && headerFocused;
       return <Text key={id} backgroundColor={hasColorCursor ? color : undefined} color={hasColorCursor ? "inverseText" : undefined} inverse={isCurrent && !hasColorCursor} bold={isCurrent}>{" "}{title_0}{" "}</Text>;
-    })}{spacerWidth > 0 && <Text>{" ".repeat(spacerWidth)}</Text>}</Box>;
+    })}{(scrollStart > 0 || scrollEnd < tabs.length) && <Text dimColor={true}>›</Text>}{spacerWidth > 0 && <Text>{" ".repeat(spacerWidth)}</Text>}</Box>;
   let t17;
   if ($[11] !== children || $[12] !== contentHeight || $[13] !== contentWidth || $[14] !== hidden || $[15] !== modalScrollRef || $[16] !== selectedTabIndex) {
     t17 = modalScrollRef ? <Box width={contentWidth} marginTop={hidden ? 0 : 1} flexShrink={0}><ScrollBox key={selectedTabIndex} ref={modalScrollRef} flexDirection="column" flexShrink={0}>{tabChildren}</ScrollBox></Box> : <Box width={contentWidth} marginTop={hidden ? 0 : 1} height={contentHeight} overflowY={contentHeight !== undefined ? "hidden" : undefined}>{tabChildren}</Box>;

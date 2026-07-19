@@ -742,6 +742,22 @@ export function pathInAllowedWorkingPath(
   )
 }
 
+/**
+ * Returns true when `path` sits inside the workspace tree — i.e. at or under
+ * the project root (getOriginalCwd(), the session-stable project directory).
+ *
+ * Used by the "same directory never asks" rule: operations whose every target
+ * is within the workspace tree are auto-allowed unless they also classify into
+ * a sensitive category (handled by callers). Resolves symlinks/case the same
+ * way as pathInWorkingPath so resolved and unresolved paths compare symmetrically.
+ */
+export function isWithinWorkspace(path: string): boolean {
+  const roots = [getOriginalCwd(), getCwd()].filter(
+    (p, i, arr) => p && arr.indexOf(p) === i,
+  )
+  return roots.some(root => pathInWorkingPath(path, root))
+}
+
 export function pathInWorkingPath(path: string, workingPath: string): boolean {
   const absolutePath = expandPath(path)
   const absoluteWorkingPath = expandPath(workingPath)
@@ -1157,6 +1173,22 @@ export function checkReadPermissionForTool(
     }
   }
 
+  // 4.5. Same-directory auto-allow: reads whose target is inside the workspace
+  // tree (the project root and its subdirectories) are permitted without a
+  // prompt, so long as no explicit deny/ask rule above already applied. This
+  // realizes the "same directory never asks" rule across all permission modes.
+  // Sensitive/cross-tree paths fall through to the normal resolution below.
+  if (isWithinWorkspace(path)) {
+    return {
+      behavior: 'allow',
+      updatedInput: input,
+      decisionReason: {
+        type: 'workingDir',
+        reason: 'Path is inside the workspace tree (same-directory auto-allow)',
+      },
+    }
+  }
+
   // 5. Edit access implies read access (but only if no read-specific deny/ask rules exist)
   // We check this after read-specific rules so that explicit read restrictions take precedence
   const editResult = checkWritePermissionForTool(
@@ -1395,6 +1427,39 @@ export function checkWritePermissionForTool<Input extends AnyObject>(
           rule: askRule,
         },
       }
+    }
+  }
+
+  // 2.5. Same-directory auto-allow: edits whose target is inside the workspace
+  // tree (project root + subdirectories) are permitted without a prompt — the
+  // "same directory never asks" rule, across all permission modes. This sits
+  // after the deny/safety/ask checks above so explicit ask rules and dangerous
+  // files still win. Sensitive/cross-tree paths fall through below.
+  if (isWithinWorkspace(path)) {
+    return {
+      behavior: 'allow',
+      updatedInput: input,
+      decisionReason: {
+        type: 'workingDir',
+        reason: 'Path is inside the workspace tree (same-directory auto-allow)',
+      },
+    }
+  }
+
+  // 2.5. Same-directory auto-allow: writes whose target is inside the workspace
+  // tree (the project root + subdirectories) are permitted without a prompt, in
+  // every permission mode. Deny rules (step 1), safety checks (step 1.7), and
+  // explicit ask rules (step 2) already had their chance to win above; this
+  // realizes "auto (new) is permissive by default — also auto-allow edits".
+  // Cross-tree or sensitive paths fall through to the normal resolution below.
+  if (isWithinWorkspace(path)) {
+    return {
+      behavior: 'allow',
+      updatedInput: input,
+      decisionReason: {
+        type: 'workingDir',
+        reason: 'Path is inside the workspace tree (same-directory edit auto-allow)',
+      },
     }
   }
 

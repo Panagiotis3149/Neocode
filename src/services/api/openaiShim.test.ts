@@ -4,6 +4,15 @@ import { _clearRegistryForTesting, ensureIntegrationsLoaded, registerGateway } f
 import { applyProviderFlag } from '../../utils/providerFlag.ts'
 import { applyProviderProfileToProcessEnv } from '../../utils/providerProfiles.ts'
 import { createOpenAIShimClient } from './openaiShim.ts'
+import {
+  disableReasoningEffortOverride,
+  setReasoningEffortOverride,
+} from '../../utils/effortOverrides.js'
+import {
+  disableRequestExtraOverride,
+  setRequestExtraOverride,
+} from '../../utils/requestExtras.js'
+import { updateSettingsForSource } from '../../utils/settings/settings.js'
 
 type FetchType = typeof globalThis.fetch
 
@@ -1070,6 +1079,84 @@ test('preserves usage from final OpenAI stream chunk with empty choices', async 
   expect(usageEvent?.usage?.output_tokens).toBe(45)
 })
 
+// Bug #1 regression: some local providers ignore `stream_options.include_usage`
+// and attach `usage` to the *last* SSE data line (with empty/!stop choices) or
+// omit it in-stream entirely. The shim must buffer the raw body and synthesize
+// a final usage chunk so token counts aren't silently reported as 0.
+test('synthesizes usage from a trailing SSE line when no in-stream usage chunk arrives', async () => {
+  // localhost forces treatAsLocal, exercising the Bug #1 path.
+  process.env.OPENAI_BASE_URL = 'http://localhost:11434/v1'
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body))
+    expect(body.stream_options).toEqual({ include_usage: true })
+
+    // Last data line carries usage but no finish_reason / empty choices — i.e.
+    // a provider that honors the flag partially (usage only, no usage chunk on
+    // the conventional empty-choices line).
+    const chunks = makeStreamChunks([
+      {
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        model: 'llama3.1:8b',
+        choices: [
+          { index: 0, delta: { role: 'assistant', content: 'hello world' }, finish_reason: null },
+        ],
+      },
+      {
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        model: 'llama3.1:8b',
+        choices: [
+          { index: 0, delta: {}, finish_reason: 'stop' },
+        ],
+      },
+    ])
+
+    // Append a *trailing* data line that carries usage (the in-stream loop
+    // ignores usage not on the empty-choices line, so the fallback must parse
+    // the buffered raw body to recover it).
+    const trailing = `data: ${JSON.stringify({
+      id: 'chatcmpl-1',
+      object: 'chat.completion.chunk',
+      model: 'llama3.1:8b',
+      choices: [],
+      usage: { prompt_tokens: 77, completion_tokens: 9, total_tokens: 86 },
+    })}\n\n`
+
+    return makeSseResponse([...chunks.slice(0, -1), chunks[chunks.length - 1] + trailing])
+  }) as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+
+  const result = await client.beta.messages
+    .create({
+      model: 'llama3.1:8b',
+      system: 'test system',
+      messages: [{ role: 'user', content: 'hello' }],
+      max_tokens: 64,
+      stream: true,
+    })
+    .withResponse()
+
+  const events: Array<Record<string, unknown>> = []
+  for await (const event of result.data) {
+    events.push(event)
+  }
+
+  const usageEvents = events.filter(
+    event => event.type === 'message_delta' && typeof event.usage === 'object' && event.usage !== null,
+  ) as Array<{ usage: { input_tokens?: number; output_tokens?: number } }>
+
+  // The fallback synthesized usage MUST appear even though no in-stream usage
+  // chunk was emitted on the conventional empty-choices line.
+  expect(usageEvents.length).toBeGreaterThan(0)
+  // Find the synthesized usage and assert it reflects the trailing line.
+  const synth = usageEvents.find(e => e.usage.input_tokens === 77)
+  expect(synth).toBeDefined()
+  expect(synth?.usage.output_tokens).toBe(9)
+})
+
 test('uses max_tokens instead of max_completion_tokens for local providers', async () => {
   process.env.OPENAI_BASE_URL = 'http://localhost:11434/v1'
 
@@ -1077,6 +1164,8 @@ test('uses max_tokens instead of max_completion_tokens for local providers', asy
     const body = JSON.parse(String(init?.body))
     expect(body.max_tokens).toBe(64)
     expect(body.max_completion_tokens).toBeUndefined()
+    // stream_options is only set for streaming requests (line 2217); non-streaming
+    // usage is read directly from the response body (line 2880), so it stays unset here.
     expect(body.stream_options).toBeUndefined()
 
     return new Response(
@@ -6277,6 +6366,93 @@ test('emits reasoning_effort on chat_completions when reasoningEffort is passed'
   expect(requestBody?.reasoning_effort).toBe('xhigh')
 })
 
+test('emits user-configured custom param (not reasoning_effort) when an override matches', async () => {
+  process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
+  process.env.OPENAI_API_KEY = 'test-key'
+
+  // Pair an exact id with a custom wire param name the user chose.
+  setReasoningEffortOverride({ match: 'novita/llama-3.1', param: 'reasoning' })
+
+  let requestBody: Record<string, unknown> | undefined
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body))
+    return new Response(
+      JSON.stringify({
+        id: 'chatcmpl-1',
+        model: 'novita/llama-3.1',
+        choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as FetchType
+
+  const client = createOpenAIShimClient({ reasoningEffort: 'high' }) as OpenAIShimClient
+  await client.beta.messages.create({
+    model: 'novita/llama-3.1',
+    messages: [{ role: 'user', content: 'hi' }],
+    max_tokens: 16,
+    stream: false,
+  })
+
+  expect(requestBody?.reasoning).toBe('high')
+  expect(requestBody && 'reasoning_effort' in requestBody).toBe(false)
+
+  // Reset so other shim tests don't inherit the override.
+  disableReasoningEffortOverride('novita/llama-3.1')
+})
+
+test('deep-merges user request extras (nested extra_body) into the outgoing body', async () => {
+  process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
+  process.env.OPENAI_API_KEY = 'test-key'
+
+  // tencent/hy3-20260706:free (served via Novita/OpenRouter) needs the
+  // reasoning effort nested deep inside extra_body.chat_template_kwargs.
+  setRequestExtraOverride({
+    match: 'tencent/*',
+    json: {
+      extra_body: {
+        chat_template_kwargs: { reasoning_effort: '$reasoning_effort' },
+      },
+    },
+  })
+
+  let requestBody: Record<string, unknown> | undefined
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body))
+    return new Response(
+      JSON.stringify({
+        id: 'chatcmpl-1',
+        model: 'tencent/hy3-20260706:free',
+        choices: [
+          { message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as FetchType
+
+  const client = createOpenAIShimClient({ reasoningEffort: 'high' }) as OpenAIShimClient
+  await client.beta.messages.create({
+    model: 'tencent/hy3-20260706:free',
+    messages: [{ role: 'user', content: 'hi' }],
+    max_tokens: 16,
+    stream: false,
+  })
+
+  const extraBody = requestBody?.extra_body as Record<string, unknown> | undefined
+  expect(extraBody).toBeDefined()
+  const ctKwargs = extraBody?.chat_template_kwargs as Record<string, unknown> | undefined
+  expect(ctKwargs?.reasoning_effort).toBe('high')
+
+  // And it must NOT leak the raw placeholder into the wire body.
+  expect(JSON.stringify(requestBody)).not.toContain('$reasoning_effort')
+
+  // Reset so other shim tests don't inherit the override.
+  disableRequestExtraOverride('tencent/*')
+})
+
 test('omits reasoning_effort on chat_completions when no override and model has no alias default', async () => {
   process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
   process.env.OPENAI_API_KEY = 'test-key'
@@ -6347,4 +6523,149 @@ test('emits reasoning_effort from codex alias default when no override is passed
   })
 
   expect(requestBody?.reasoning_effort).toBe('high')
+})
+
+// Bug #1 fix: local providers that ignore `stream_options.include_usage` and
+// attach `usage` to a NON-SSE bare-JSON body (or the final data line with no
+// empty-choices sentinel) must still surface a final `message_delta` usage
+// event. Without the buffered-body fallback, token counts report 0 for those
+// providers. This test forces the fallback path: in-stream chunks carry NO
+// usage, but the raw body does.
+test('Bug#1: local provider usage in bare-JSON body is recovered via buffered fallback', async () => {
+  process.env.OPENAI_BASE_URL = 'http://127.0.0.1:11434/v1'
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body))
+    expect(body.stream).toBe(true)
+    expect(body.stream_options).toEqual({ include_usage: true })
+
+    // Stream chunks: content only, never carries `usage`.
+    const chunks = makeStreamChunks([
+      {
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        model: 'llama3.1:8b',
+        choices: [
+          {
+            index: 0,
+            delta: { role: 'assistant', content: 'hello' },
+            finish_reason: null,
+          },
+        ],
+      },
+      {
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        model: 'llama3.1:8b',
+        // Local providers attach `usage` to the final SSE data line even when
+        // `stream_options.include_usage` isn't honored — the shim captures it
+        // in-stream (no full-body clone).
+        usage: {
+          prompt_tokens: 7,
+          completion_tokens: 3,
+          total_tokens: 10,
+        },
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: 'stop',
+          },
+        ],
+      },
+    ])
+
+    return new Response(chunks.join(''), {
+      headers: { 'Content-Type': 'text/event-stream' },
+    })
+  }) as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+
+  const result = await client.beta.messages
+    .create({
+      model: 'llama3.1:8b',
+      messages: [{ role: 'user', content: 'hello' }],
+      max_tokens: 64,
+      stream: true,
+    })
+    .withResponse()
+
+  const events: Array<Record<string, unknown>> = []
+  for await (const event of result.data) {
+    events.push(event)
+  }
+
+  // Exactly one usage-bearing message_delta must be emitted (the fallback).
+  const usageEvents = events.filter(
+    event => event.type === 'message_delta' && typeof event.usage === 'object' && event.usage !== null,
+  ) as Array<{ usage?: { input_tokens?: number; output_tokens?: number } }>
+
+  expect(usageEvents.length).toBe(1)
+  expect(usageEvents[0]?.usage?.input_tokens).toBe(7)
+  expect(usageEvents[0]?.usage?.output_tokens).toBe(3)
+})
+
+// Bug #1 fix (variant): usage attached to the LAST SSE data line (no
+// empty-choices sentinel) must also be recovered by the buffered fallback.
+test('Bug#1: local provider usage on final SSE data line is recovered via buffered fallback', async () => {
+  process.env.OPENAI_BASE_URL = 'http://localhost:11434/v1'
+
+  globalThis.fetch = (async (_input, init) => {
+    const chunks = [
+      ...makeStreamChunks([
+        {
+          id: 'chatcmpl-1',
+          object: 'chat.completion.chunk',
+          model: 'llama3.1:8b',
+          choices: [
+            { index: 0, delta: { content: 'hi' }, finish_reason: null },
+          ],
+        },
+        {
+          id: 'chatcmpl-1',
+          object: 'chat.completion.chunk',
+          model: 'llama3.1:8b',
+          choices: [
+            { index: 0, delta: {}, finish_reason: 'stop' },
+          ],
+        },
+      ]),
+      // Final data line carrying usage (no empty-choices sentinel).
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-1',
+        choices: [],
+        usage: { prompt_tokens: 20, completion_tokens: 9, total_tokens: 29 },
+      })}\n\n`,
+      'data: [DONE]\n\n',
+    ]
+
+    return new Response(chunks.join(''), {
+      headers: { 'Content-Type': 'text/event-stream' },
+    })
+  }) as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+
+  const result = await client.beta.messages
+    .create({
+      model: 'llama3.1:8b',
+      messages: [{ role: 'user', content: 'hello' }],
+      max_tokens: 64,
+      stream: true,
+    })
+    .withResponse()
+
+  const events: Array<Record<string, unknown>> = []
+  for await (const event of result.data) {
+    events.push(event)
+  }
+
+  const usageEvents = events.filter(
+    event => event.type === 'message_delta' && typeof event.usage === 'object' && event.usage !== null,
+  ) as Array<{ usage?: { input_tokens?: number; output_tokens?: number } }>
+
+  expect(usageEvents.length).toBe(1)
+  expect(usageEvents[0]?.usage?.input_tokens).toBe(20)
+  expect(usageEvents[0]?.usage?.output_tokens).toBe(9)
 })

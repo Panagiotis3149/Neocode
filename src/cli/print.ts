@@ -106,6 +106,8 @@ import {
   isShuttingDown,
 } from 'src/utils/gracefulShutdown.js'
 import { registerCleanup } from 'src/utils/cleanupRegistry.js'
+import { reapOrphanedChildren } from 'src/utils/childReaper.js'
+import { getAppState, setAppState } from 'src/state/AppStateStore.js'
 import { createIdleTimeoutManager } from 'src/utils/idleTimeout.js'
 import type {
   SDKStatus,
@@ -1048,6 +1050,12 @@ function runHeadlessStreaming(
       internal_events_pending: structuredIO.internalEventsPending,
       bg_tasks: bg,
     })
+  })
+  // Kill orphaned children (tracked execFileNoThrow git/diff processes, running
+  // LocalShellTasks, LSP servers) if the process exits for any reason —
+  // including a crash — so they don't linger as zombies / dead git instances.
+  registerCleanup(() => {
+    reapOrphanedChildren(getAppState, setAppState)
   })
 
   // Wire the central onChangeAppState mode-diff hook to the SDK output stream.

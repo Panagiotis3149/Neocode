@@ -19,4 +19,4 @@ bun run build
 if errorlevel 1 exit /b %errorlevel%
 
 echo Starting Neocode...
-node "%ROOT_DIR%\dist\cli.mjs --resume" %*
+node "%ROOT_DIR%\dist\cli.mjs" --resume %*

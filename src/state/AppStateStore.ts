@@ -385,6 +385,9 @@ export type AppState = DeepImmutable<{
     requestId: string
     host: string
   } | null
+  // True when Auto (New) mode has surfaced a permission prompt the user must
+  // resolve. Drives the lightweight amber "ATTENTION" banner in the prompt footer.
+  pendingAutoNewAttention: boolean
   promptSuggestion: {
     text: string | null
     promptId: 'user_intent' | 'stated_intent' | null
@@ -545,6 +548,7 @@ export function getDefaultAppState(): AppState {
       selectedIndex: 0,
     },
     pendingWorkerRequest: null,
+    pendingAutoNewAttention: false,
     pendingSandboxRequest: null,
     promptSuggestion: {
       text: null,

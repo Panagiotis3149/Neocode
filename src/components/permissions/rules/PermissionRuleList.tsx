@@ -32,6 +32,7 @@ import { usePermissionModeChangeRequest } from '../usePermissionModeChangeReques
 import { AddPermissionRules } from './AddPermissionRules.js';
 import { AddWorkspaceDirectory } from './AddWorkspaceDirectory.js';
 import { PermissionModeTab } from './PermissionModeTab.js';
+import { AutoNewSettingsTab } from './AutoNewSettingsTab.js';
 import { PermissionRuleDescription } from './PermissionRuleDescription.js';
 import { PermissionRuleInput } from './PermissionRuleInput.js';
 import type { ManageablePermissionMode } from './permissionModeOptions.js';
@@ -479,7 +480,7 @@ type Props = {
   onRetryDenials?: (commands: string[]) => void;
 };
 export function PermissionRuleList(t0) {
-  const $ = _c(140);
+  const $ = _c(141);
   const {
     onExit,
     initialTab,
@@ -1172,9 +1173,16 @@ export function PermissionRuleList(t0) {
   } else {
     t29 = $[92];
   }
+  let tAutoNew;
+  if ($[140] === Symbol.for("react.memo_cache_sentinel")) {
+    tAutoNew = <Tab id="autonew" title="Auto (New)"><AutoNewSettingsTab /></Tab>;
+    $[140] = tAutoNew;
+  } else {
+    tAutoNew = $[140];
+  }
   let t30;
-  if ($[93] !== defaultTab || $[94] !== isHidden || $[95] !== t23 || $[96] !== t25 || $[97] !== t26 || $[98] !== t27 || $[99] !== t29 || $[138] !== t24 || $[139] !== tModeTab) {
-    t30 = <Tabs title="Permissions:" color="permission" defaultTab={defaultTab} hidden={isHidden} initialHeaderFocused={!hasDenials} navFromContent={t23}>{tModeTab}{t24}{t25}{t26}{t27}{t29}</Tabs>;
+  if ($[93] !== defaultTab || $[94] !== isHidden || $[95] !== t23 || $[96] !== t25 || $[97] !== t26 || $[98] !== t27 || $[99] !== t29 || $[138] !== t24 || $[139] !== tModeTab || $[141] !== tAutoNew) {
+    t30 = <Tabs title="Permissions:" color="permission" defaultTab={defaultTab} hidden={isHidden} initialHeaderFocused={!hasDenials} navFromContent={t23}>{tModeTab}{t24}{t25}{t26}{t27}{t29}{tAutoNew}</Tabs>;
     $[93] = defaultTab;
     $[94] = isHidden;
     $[95] = t23;
@@ -1184,6 +1192,7 @@ export function PermissionRuleList(t0) {
     $[99] = t29;
     $[138] = t24;
     $[139] = tModeTab;
+    $[141] = tAutoNew;
     $[100] = t30;
   } else {
     t30 = $[100];

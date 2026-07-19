@@ -74,3 +74,24 @@ export function killShellTasksForAgent(
   // harmlessly (no consumer matches a dead agentId).
   dequeueAllMatching(cmd => cmd.agentId === agentId)
 }
+
+/**
+ * Kill ALL locally-running shell tasks, regardless of owning agent.
+ * Used by the global orphan reaper (src/utils/childReaper.ts) when the app
+ * crashes or exits suddenly, so background bash processes don't outlive the
+ * Neocode process itself (prevents dead git instances and bash zombies).
+ */
+export function killAllShellTasks(
+  getAppState: () => AppState,
+  setAppState: SetAppStateFn,
+): void {
+  const tasks = getAppState().tasks ?? {}
+  for (const [taskId, task] of Object.entries(tasks)) {
+    if (isLocalShellTask(task) && task.status === 'running') {
+      logForDebugging(
+        `killAllShellTasks: killing orphaned shell task ${taskId} (app shutdown)`,
+      )
+      killTask(taskId, setAppState)
+    }
+  }
+}

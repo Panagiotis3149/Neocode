@@ -760,16 +760,24 @@ export function getTotalWebSearchRequests(): number {
 
 let outputTokensAtTurnStart = 0
 let currentTurnTokenBudget: number | null = null
+let currentTurnTokenBudgetMode: 'target' | 'cap' = 'target'
 export function getTurnOutputTokens(): number {
   return getTotalOutputTokens() - outputTokensAtTurnStart
 }
 export function getCurrentTurnTokenBudget(): number | null {
   return currentTurnTokenBudget
 }
+export function getCurrentTurnTokenBudgetMode(): 'target' | 'cap' {
+  return currentTurnTokenBudgetMode
+}
 let budgetContinuationCount = 0
-export function snapshotOutputTokensForTurn(budget: number | null): void {
+export function snapshotOutputTokensForTurn(
+  budget: number | null,
+  mode: 'target' | 'cap' = 'target',
+): void {
   outputTokensAtTurnStart = getTotalOutputTokens()
   currentTurnTokenBudget = budget
+  currentTurnTokenBudgetMode = budget === null ? 'target' : mode
   budgetContinuationCount = 0
 }
 export function getBudgetContinuationCount(): number {

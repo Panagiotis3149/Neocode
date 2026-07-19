@@ -18,7 +18,7 @@ export function getDefaultPermissionModeOptions(
   const allModes: readonly PermissionMode[] = feature('TRANSCRIPT_CLASSIFIER')
     ? PERMISSION_MODES
     : EXTERNAL_PERMISSION_MODES
-  const excluded: PermissionMode[] = ['bypassPermissions', 'fullAccess']
+  const excluded: PermissionMode[] = ['bypassPermissions', 'fullAccess', 'autoNew']
 
   if (feature('TRANSCRIPT_CLASSIFIER') && !showAutoInDefaultModePicker) {
     excluded.push('auto')

@@ -25,7 +25,29 @@ describe('getEffectiveDefaultPermissionModeFromSettingsSources', () => {
     expect(mode).toBeUndefined()
   })
 
-  test('still honors dangerous default modes from trusted sources', () => {
+  test('never honors dangerous default modes from ANY source (hard constraint)', () => {
+    // The user requirement is explicit: the bypass/fullAccess modes must NOT
+    // be possible to set as a default/persisted mode — regardless of whether
+    // the value comes from user, project, local, or policy settings. A
+    // bypass default would otherwise apply silently on startup, defeating the
+    // interactive double-verify gate.
+    for (const source of ['userSettings', 'projectSettings', 'localSettings', 'policySettings']) {
+      const mode = getEffectiveDefaultPermissionModeFromSettingsSources([
+        {
+          source: source as 'projectSettings',
+          settings: {
+            permissions: {
+              defaultMode: 'fullAccess',
+            },
+          },
+        },
+      ])
+
+      expect(mode).toBeUndefined()
+    }
+  })
+
+  test('a non-dangerous mode from local settings still wins over a dangerous project default', () => {
     const mode = getEffectiveDefaultPermissionModeFromSettingsSources([
       {
         source: 'projectSettings',
@@ -39,13 +61,13 @@ describe('getEffectiveDefaultPermissionModeFromSettingsSources', () => {
         source: 'localSettings',
         settings: {
           permissions: {
-            defaultMode: 'fullAccess',
+            defaultMode: 'plan',
           },
         },
       },
     ])
 
-    expect(mode).toBe('fullAccess')
+    expect(mode).toBe('plan')
   })
 
   test('preserves non-dangerous project default modes', () => {

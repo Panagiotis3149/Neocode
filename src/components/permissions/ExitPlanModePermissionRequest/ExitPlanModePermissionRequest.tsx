@@ -28,7 +28,7 @@ import { getMainLoopModel, getRuntimeMainLoopModel, modelDisplayString } from '.
 import { createPromptRuleContent, isClassifierPermissionsEnabled, PROMPT_PREFIX } from '../../../utils/permissions/bashClassifier.js';
 import { type PermissionMode, toExternalPermissionMode } from '../../../utils/permissions/PermissionMode.js';
 import type { PermissionUpdate } from '../../../utils/permissions/PermissionUpdateSchema.js';
-import { isAutoModeGateEnabled, restoreDangerousPermissions, stripDangerousPermissionsForAutoMode } from '../../../utils/permissions/permissionSetup.js';
+import { applyPermissionModeChange, isAutoModeGateEnabled, restoreDangerousPermissions, stripDangerousPermissionsForAutoMode } from '../../../utils/permissions/permissionSetup.js';
 import { getPewterLedgerVariant, isPlanModeInterviewPhaseEnabled } from '../../../utils/planModeV2.js';
 import { getPlan, getPlanFilePath } from '../../../utils/plans.js';
 import { editFileInEditor, editPromptInEditor } from '../../../utils/promptEditor.js';
@@ -49,7 +49,7 @@ import type { PastedContent } from '../../../utils/config.js';
 import type { ImageDimensions } from '../../../utils/imageResizer.js';
 import { maybeResizeAndDownsampleImageBlock } from '../../../utils/imageResizer.js';
 import { cacheImagePath, storeImage } from '../../../utils/imageStore.js';
-type ResponseValue = 'yes-bypass-permissions' | 'yes-full-access' | 'yes-accept-edits' | 'yes-bypass-permissions-keep-context' | 'yes-full-access-keep-context' | 'yes-accept-edits-keep-context' | 'yes-default-keep-context' | 'yes-resume-auto-mode' | 'yes-auto-clear-context' | 'ultraplan' | 'no';
+type ResponseValue = 'yes-bypass-permissions' | 'yes-full-access' | 'yes-accept-edits' | 'yes-bypass-permissions-keep-context' | 'yes-full-access-keep-context' | 'yes-accept-edits-keep-context' | 'yes-default-keep-context' | 'yes-resume-auto-mode' | 'yes-auto-clear-context' | 'yes-resume-autonew-mode' | 'yes-autonew-clear-context' | 'ultraplan' | 'no';
 type DangerousPlanExitMode = Extract<
   PermissionMode,
   'bypassPermissions' | 'fullAccess'
@@ -397,7 +397,8 @@ export function ExitPlanModePermissionRequest({
     // The REPL will handle context clear and trigger a fresh query
     // Keep-context options skip this block and go through the normal flow below
     const isResumeAutoOption = feature('TRANSCRIPT_CLASSIFIER') ? value === 'yes-resume-auto-mode' : false;
-    const isKeepContextOption = value === 'yes-bypass-permissions-keep-context' || value === 'yes-full-access-keep-context' || value === 'yes-accept-edits-keep-context' || value === 'yes-default-keep-context' || isResumeAutoOption;
+    const isResumeAutoNewOption = value === 'yes-resume-autonew-mode';
+    const isKeepContextOption = value === 'yes-bypass-permissions-keep-context' || value === 'yes-full-access-keep-context' || value === 'yes-accept-edits-keep-context' || value === 'yes-default-keep-context' || isResumeAutoOption || isResumeAutoNewOption;
     if (value !== 'no') {
       autoNameSessionFromPlan(currentPlan, setAppState, !isKeepContextOption);
     }
@@ -415,6 +416,12 @@ export function ExitPlanModePermissionRequest({
         // but does NOT set autoModeActive. Gate-off falls through to 'default'.
         mode = 'auto';
         autoModeStateModule?.setAutoModeActive(true);
+      } else if (value === 'yes-autonew-clear-context') {
+        // Auto (New) mode is not gated behind TRANSCRIPT_CLASSIFIER, so its
+        // clear-context plan-execution option is always available. The REPL's
+        // processInitialMessage handles mode entry (seeds temp/ and .claude
+        // read access via transitionPermissionMode).
+        mode = 'autoNew';
       }
 
       // Log plan exit event
@@ -482,6 +489,32 @@ export function ExitPlanModePermissionRequest({
           mode: 'auto',
           prePlanMode: undefined
         })
+      }));
+      onDone();
+      toolUseConfirm.onAllow(updatedInput, [], acceptFeedback);
+      return;
+    }
+
+    // Handle Auto (New) keep-context option — like Legacy auto, buildPermissionUpdates
+    // maps autoNew to 'default' via toExternalPermissionMode, so we set the mode directly
+    // through the standard mode-transition entry (which seeds temp/ + .claude read access
+    // and applies the per-category autonomous policy). Auto (New) is not gated behind
+    // TRANSCRIPT_CLASSIFIER.
+    if (value === 'yes-resume-autonew-mode') {
+      logEvent('tengu_plan_exit', {
+        planLengthChars: currentPlan.length,
+        outcome: value as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        clearContext: false,
+        interviewPhaseEnabled: isPlanModeInterviewPhaseEnabled(),
+        planStructureVariant,
+        hasFeedback: !!acceptFeedback
+      });
+      setHasExitedPlanMode(true);
+      setNeedsPlanModeExitAttachment(true);
+      setAppState(prev => ({
+        ...prev,
+        toolPermissionContext: applyPermissionModeChange(prev.toolPermissionContext, 'autoNew'),
+        pendingAutoNewAttention: true
       }));
       onDone();
       toolUseConfirm.onAllow(updatedInput, [], acceptFeedback);
@@ -779,6 +812,13 @@ export function buildPlanApprovalOptions({
         value: 'yes-auto-clear-context'
       });
     }
+    // Auto (New) mode is not gated behind TRANSCRIPT_CLASSIFIER — it works in
+    // every build, so its plan-execution option is always offered alongside the
+    // Legacy auto mode option.
+    options.push({
+      label: `Yes, clear context${usedLabel} and use Auto (New) mode`,
+      value: 'yes-autonew-clear-context'
+    });
     if (dangerousPlanExitMode) {
       options.push({
         label: `Yes, clear context${usedLabel} and ${getDangerousPlanExitLabel(dangerousPlanExitMode)}`,
@@ -798,13 +838,17 @@ export function buildPlanApprovalOptions({
     }
   }
 
-  // Slot 2: keep-context with elevated mode (same priority: auto > bypass > edits).
+  // Slot 2: keep-context with elevated mode (same priority: auto > autonew > bypass > edits).
   if (feature('TRANSCRIPT_CLASSIFIER') && isAutoModeAvailable) {
     options.push({
       label: 'Yes, and use auto mode',
       value: 'yes-resume-auto-mode'
     });
   }
+  options.push({
+    label: 'Yes, and use Auto (New) mode',
+    value: 'yes-resume-autonew-mode'
+  });
   if (dangerousPlanExitMode) {
     options.push({
       label: `Yes, and ${getDangerousPlanExitLabel(dangerousPlanExitMode)}`,

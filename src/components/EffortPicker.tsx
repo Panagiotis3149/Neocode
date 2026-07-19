@@ -30,9 +30,17 @@ type EffortOption = {
 type Props = {
   onSelect: (effort: EffortLevel | undefined) => void
   onCancel?: () => void
+  /** Shown (as a Custom option) when the model doesn't support effort natively. */
+  onCustom?: () => void
+  /** When the model already has a custom effort/extras override configured, this
+   *  surfaces it as a selectable "Custom" entry that re-opens the setup. */
+  customConfig?: {
+    match: string
+    detail: string
+  }
 }
 
-export function EffortPicker({ onSelect, onCancel }: Props) {
+export function EffortPicker({ onSelect, onCancel, onCustom, customConfig }: Props) {
   const model = useMainLoopModel()
   const appStateEffort = useAppState((s: any) => s.effortValue)
   const setAppState = useSetAppState()
@@ -40,6 +48,7 @@ export function EffortPicker({ onSelect, onCancel }: Props) {
   const usesOpenAIEffort = modelUsesOpenAIEffort(model)
   const availableLevels = getAvailableEffortLevels(model)
   const currentDisplayedLevel = getDisplayedEffortLevel(model, appStateEffort)
+  const supportsEffort = modelSupportsEffort(model)
 
   // For OpenAI/Codex, get the model's default reasoning effort
   const modelReasoningEffort = usesOpenAIEffort ? getReasoningEffortForModel(model) : undefined
@@ -68,9 +77,30 @@ export function EffortPicker({ onSelect, onCancel }: Props) {
         isAvailable: true,
       }
     }),
+    ...(onCustom
+      ? [
+          customConfig
+            ? ({
+                label: <EffortOptionLabel level={'auto'} text="Custom" isCurrent={false} />,
+                value: '__custom__',
+                description: `Custom setup for "${customConfig.match}": ${customConfig.detail}`,
+                isAvailable: true,
+              } as EffortOption)
+            : ({
+                label: <EffortOptionLabel level={'auto'} text="Custom…" isCurrent={false} />,
+                value: '__custom__',
+                description: 'Set up effort for this model with a custom wire param (e.g. reasoning, extra_body.chat_template_kwargs)',
+                isAvailable: true,
+              } as EffortOption),
+        ]
+      : []),
   ]
 
   function handleSelect(value: string) {
+    if (value === '__custom__') {
+      onCustom?.()
+      return
+    }
     if (value === 'auto') {
       setAppState(prev => ({
         ...prev,
@@ -95,8 +125,6 @@ export function EffortPicker({ onSelect, onCancel }: Props) {
   function handleCancel() {
     onCancel?.()
   }
-
-  const supportsEffort = modelSupportsEffort(model)
   // For OpenAI/Codex: prefer the user's current selection (max → xhigh for
   // option matching), otherwise the model's alias default, otherwise auto.
   // For Claude: user's current selection or auto.

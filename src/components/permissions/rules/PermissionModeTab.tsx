@@ -7,6 +7,7 @@ import {
   getPermissionModeOptions,
   type ManageablePermissionMode,
 } from './permissionModeOptions.js'
+import { getAutoModeDenials } from '../../../utils/autoModeDenials.js'
 
 type Props = {
   toolPermissionContext: ToolPermissionContext
@@ -56,6 +57,43 @@ export function PermissionModeTab({
         onUpFromFirstItem={focusHeader}
         isDisabled={headerFocused}
       />
+      {currentMode === 'auto' ? (
+        <AutoModeSummary />
+      ) : currentMode === 'autoNew' ? (
+        <AutoNewModeSummaryHint />
+      ) : null}
+    </Box>
+  )
+}
+
+function AutoModeSummary() {
+  const denials = getAutoModeDenials()
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text bold={true}>
+        Auto (Legacy) mode — recently denied by classifier:
+      </Text>
+      {denials.length === 0 ? (
+        <Text dimColor={true}>  (none yet this session)</Text>
+      ) : (
+        denials.map((denial, i) => (
+          <Text key={i} dimColor={true}>
+            {'  '}
+            {denial.display} — {denial.reason}
+          </Text>
+        ))
+      )}
+    </Box>
+  )
+}
+
+function AutoNewModeSummaryHint() {
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text dimColor={true}>
+        Auto (New) mode is active. Its per-category policy is configured under
+        the <Text color="warning">Auto (New)</Text> tab above.
+      </Text>
     </Box>
   )
 }

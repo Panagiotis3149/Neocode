@@ -65,6 +65,22 @@ const CODEX_ALIAS_MODELS: Record<
     model: 'gpt-5.5',
     reasoningEffort: 'high',
   },
+  'gpt-5.6': {
+    model: 'gpt-5.6-sol',
+    reasoningEffort: 'high',
+  },
+  'gpt-5.6-sol': {
+    model: 'gpt-5.6-sol',
+    reasoningEffort: 'high',
+  },
+  'gpt-5.6-terra': {
+    model: 'gpt-5.6-terra',
+    reasoningEffort: 'medium',
+  },
+  'gpt-5.6-luna': {
+    model: 'gpt-5.6-luna',
+    reasoningEffort: 'medium',
+  },
   'gpt-5.5': {
     model: 'gpt-5.5',
     reasoningEffort: 'high',
@@ -139,6 +155,10 @@ type ModelDescriptor = {
   reasoning?: {
     effort: ReasoningEffort
   }
+  // Set when the reasoning effort was derived from a Codex alias (e.g.
+  // `gpt-5.6` -> sol@high) rather than an explicit ?reasoning= override. Used
+  // to suppress the effort on non-Codex transports, where it is not honored.
+  reasoningFromAlias?: boolean
 }
 
 const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1'])
@@ -280,6 +300,7 @@ function parseModelDescriptor(model: string): ModelDescriptor {
         reasoning: aliasConfig.reasoningEffort
           ? { effort: aliasConfig.reasoningEffort }
           : undefined,
+        reasoningFromAlias: !!aliasConfig.reasoningEffort,
       }
     }
     return {
@@ -293,16 +314,16 @@ function parseModelDescriptor(model: string): ModelDescriptor {
   const alias = baseModel.toLowerCase() as CodexAlias
   const aliasConfig = CODEX_ALIAS_MODELS[alias]
   const resolvedBaseModel = aliasConfig?.model ?? baseModel
+  const override = parseReasoningEffort(params.get('reasoning') ?? undefined)
+  const aliasEffort = aliasConfig?.reasoningEffort
   const reasoning =
-    parseReasoningEffort(params.get('reasoning') ?? undefined) ??
-    (aliasConfig?.reasoningEffort
-      ? { effort: aliasConfig.reasoningEffort }
-      : undefined)
+    override ?? (aliasEffort ? { effort: aliasEffort } : undefined)
 
   return {
     raw: trimmed,
     baseModel: resolvedBaseModel,
     reasoning: typeof reasoning === 'string' ? { effort: reasoning } : reasoning,
+    reasoningFromAlias: override ? undefined : !!aliasEffort,
   }
 }
 
@@ -745,9 +766,21 @@ export function resolveProviderRequest(options?: {
       ? normalizeGithubModelsApiModel(descriptor.baseModel)
       : descriptor.baseModel)
 
+  // The gpt-5.6 alias defaults are Codex-transport-only: off the Codex
+  // transport the 5.6 family's effort metadata is owned by the route catalog,
+  // and an OPENAI_API_BASE gateway must not inherit the first-party default.
+  // Explicit picks (the /effort override or a ?reasoning= query) still flow on
+  // every transport, and the older aliases (gpt-5.4/5.5, codexplan) keep the
+  // pre-5.6 legacy behavior of carrying their default effort everywhere.
   const reasoning = options?.reasoningEffortOverride
     ? { effort: options.reasoningEffortOverride }
-    : descriptor.reasoning
+    : descriptor.reasoningFromAlias &&
+        transport !== 'codex_responses' &&
+        /^gpt-5\.6/.test(descriptor.baseModel)
+      ? undefined
+      : descriptor.reasoningFromAlias && transport !== 'codex_responses'
+      ? undefined
+      : descriptor.reasoning
 
   return {
     transport,
@@ -1061,6 +1094,22 @@ export function getReasoningEffortForModel(model: string): ReasoningEffort | und
   return aliasConfig?.reasoningEffort
 }
 
+// The gpt-5 family boundary: gpt-5, gpt-5-*, gpt-5.x — without matching
+// gpt-50-style ids. Shared by supportsCodexReasoningEffort and the Codex
+// profile model gate so the family shape lives in one place.
+const GPT5_FAMILY_RE = /^gpt-5(?:[.-]|$)/
+// -mini / -nano tiers are API-only (never exposed through the Codex transport).
+const GPT5_MINI_NANO_RE = /(?:^|[-.])(?:mini|nano)(?:[-.]|$)/
+
+// gpt-5 family models the ChatGPT Codex backend can serve. The -mini/-nano
+// tiers are API-only (never exposed through the Codex transport), so a
+// stale gpt-5-mini pick saved under a direct-OpenAI profile must fall back
+// to the Codex profile's default rather than be sent to the backend and 400.
+export function isCodexEligibleGpt5Model(model: string): boolean {
+  const base = model.trim().toLowerCase().split('?', 1)[0] ?? ''
+  return GPT5_FAMILY_RE.test(base) && !GPT5_MINI_NANO_RE.test(base)
+}
+
 export function supportsCodexReasoningEffort(model: string): boolean {
   const normalized = model.trim().toLowerCase()
   const base = normalized.split('?', 1)[0] ?? normalized
@@ -1073,5 +1122,5 @@ export function supportsCodexReasoningEffort(model: string): boolean {
     return true
   }
 
-  return /^gpt-5(?:[.-]|$)/.test(base)
+  return GPT5_FAMILY_RE.test(base)
 }

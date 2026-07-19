@@ -14,7 +14,10 @@ import { expandPath, toRelativePath } from '../../utils/path.js'
 import { checkReadPermissionForTool } from '../../utils/permissions/filesystem.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 import { matchWildcardPattern } from '../../utils/permissions/shellRuleMatching.js'
-import { isAutoAcceptSafeGlobPattern } from '../../utils/permissions/readAutoAcceptGuard.js'
+import {
+  isAutoAcceptSafeGlobPattern,
+  isAutoNewSeededReadPath,
+} from '../../utils/permissions/readAutoAcceptGuard.js'
 import { PRODUCT_DISPLAY_NAME } from '../../constants/product.js'
 import { DESCRIPTION, GLOB_TOOL_NAME } from './prompt.js'
 import {
@@ -137,8 +140,32 @@ export const GlobTool = buildTool({
   async checkPermissions(input, context): Promise<PermissionDecision> {
     const appState = context.getAppState()
 
-    // Check if auto-accept should be blocked for this pattern
-    if (!isAutoAcceptSafeGlobPattern(input.pattern)) {
+    // Check if auto-accept should be blocked for this pattern.
+    // In Autonomous (autoNew) mode, read/search access is scoped to the
+    // *specific* workspace temp/ and .claude directories — globs there skip the
+    // guard, but every other pattern falls through to the normal safety check
+    // rather than getting a blanket waiver.
+    if (
+      appState.toolPermissionContext.mode !== 'autoNew' &&
+      !isAutoAcceptSafeGlobPattern(input.pattern)
+    ) {
+      return {
+        behavior: 'ask',
+        message: `${PRODUCT_DISPLAY_NAME} requested permissions to glob for ${input.pattern}, but you haven't granted it yet.`,
+        decisionReason: {
+          type: 'safetyCheck',
+          reason: 'Pattern matches sensitive directory or uses unsafe path traversal',
+        },
+      }
+    }
+
+    // In autoNew mode, additionally allow the seeded temp/ and .claude paths;
+    // everything else is governed by the workspace safety check above.
+    if (
+      appState.toolPermissionContext.mode === 'autoNew' &&
+      !isAutoNewSeededReadPath(expandPath(input.pattern), getCwd()) &&
+      !isAutoAcceptSafeGlobPattern(input.pattern)
+    ) {
       return {
         behavior: 'ask',
         message: `${PRODUCT_DISPLAY_NAME} requested permissions to glob for ${input.pattern}, but you haven't granted it yet.`,

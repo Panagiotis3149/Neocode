@@ -37,6 +37,14 @@ export default [
   gptModel('gpt-5.5', 'GPT-5.5', 272_000, 128_000),
   gptModel('gpt-5.5-mini', 'GPT-5.5 Mini', 400_000, 128_000),
   gptModel('gpt-5.5-nano', 'GPT-5.5 Nano', 400_000, 128_000),
+  // Context: same conservative Codex 272k input cap as gpt-5.5 above (see
+  // that comment), despite the 1.05M API descriptor value. The Codex transport
+  // (chatgpt.com/backend-api/codex) resolves to a catalog-less route that reads
+  // these descriptors, so it enforces the effective input cap; the direct
+  // api.openai.com route reads the vendor catalog and keeps the true 1.05M.
+  gptModel('gpt-5.6-sol', 'GPT-5.6 Sol', 272_000, 128_000),
+  gptModel('gpt-5.6-terra', 'GPT-5.6 Terra', 272_000, 128_000),
+  gptModel('gpt-5.6-luna', 'GPT-5.6 Luna', 272_000, 128_000),
   gptModel('gpt-5.4', 'GPT-5.4', 1_050_000, 128_000),
   gptModel('gpt-5.4-mini', 'GPT-5.4 Mini', 400_000, 128_000),
   gptModel('gpt-5.4-nano', 'GPT-5.4 Nano', 400_000, 128_000),

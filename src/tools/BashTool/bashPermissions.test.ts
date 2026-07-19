@@ -10,7 +10,19 @@ import {
   bashToolHasPermission,
   checkSandboxAutoAllow,
   stripAllLeadingEnvVars,
+  suggestionForExactCommand,
 } from './bashPermissions.js'
+
+// Validate the persistent rule shape produced for a command. Returns the rule
+// string (e.g. "ls:*") if a single prefix/exact rule is suggested, else null.
+function firstRule(command: string): string | null {
+  const updates = suggestionForExactCommand(command)
+  if (updates.length !== 1) return null
+  const rules = updates[0]!.rules
+  if (rules.length !== 1) return null
+  const rule = rules[0]!
+  return typeof rule === 'string' ? rule : rule.ruleContent
+}
 
 const originalSandboxMethods = {
   isSandboxingEnabled: SandboxManager.isSandboxingEnabled,
@@ -203,5 +215,37 @@ describe('stripAllLeadingEnvVars — SEC-02 subscript expansion guard', () => {
 
   test('still strips a safe identifier array subscript', () => {
     expect(stripAllLeadingEnvVars('ARR[idx]=x ls')).toBe('ls')
+  })
+})
+
+describe('suggestionForExactCommand — persistent rule breadth', () => {
+  test('flag 2nd token yields a first-word prefix rule (e.g. ls -la → ls:*)', () => {
+    const rule = firstRule('ls -la')
+    expect(rule).toBe('ls:*')
+  })
+
+  test('file 2nd token yields a first-word prefix rule (e.g. cat file.txt → cat:*)', () => {
+    const rule = firstRule('cat file.txt')
+    expect(rule).toBe('cat:*')
+  })
+
+  test('git subcommand yields a 2-word prefix rule (git status → git status:*)', () => {
+    const rule = firstRule('git status')
+    expect(rule).toBe('git status:*')
+  })
+
+  test('npm run X yields a 2-word prefix rule (npm run build → npm run:*)', () => {
+    const rule = firstRule('npm run build')
+    expect(rule).toBe('npm run:*')
+  })
+
+  test('bare-shell base never gets a prefix rule (sh -c ... → exact)', () => {
+    const rule = firstRule('sh -c "echo hi"')
+    expect(rule).toBe('sh -c "echo hi"')
+  })
+
+  test('sudo wrapper never gets a prefix rule (sudo ls → exact)', () => {
+    const rule = firstRule('sudo ls')
+    expect(rule).toBe('sudo ls')
   })
 })

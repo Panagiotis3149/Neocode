@@ -1064,6 +1064,218 @@ export function getAutoModeConfig():
   return undefined
 }
 
+export type AutoNewModeCategoryPolicy =
+  | 'allow'
+  | 'think'
+  | 'ask'
+  | 'thinkToThink'
+export type AutoNewModeThinkDepth = 1 | 2 | 3 | 4 | 5
+export type AutoNewModeConfig = {
+  thinkMode: '1' | '2'
+  thinkDepth: AutoNewModeThinkDepth
+  recycleBin: AutoNewModeCategoryPolicy
+  shiftDelete: AutoNewModeCategoryPolicy
+  tempRead: AutoNewModeCategoryPolicy
+  tempWrite: AutoNewModeCategoryPolicy
+  onlineRead: AutoNewModeCategoryPolicy
+  onlineWrite: AutoNewModeCategoryPolicy
+  systemRead: AutoNewModeCategoryPolicy
+  systemWrite: AutoNewModeCategoryPolicy
+  safeDev: AutoNewModeCategoryPolicy
+  runScript: AutoNewModeCategoryPolicy
+  runExecutable: AutoNewModeCategoryPolicy
+  scriptCommands: string[]
+  executables: string[]
+  other: AutoNewModeCategoryPolicy
+}
+
+const AUTO_NEW_MODE_DEFAULTS: AutoNewModeConfig = {
+  thinkMode: '2',
+  thinkDepth: 2,
+  recycleBin: 'allow',
+  shiftDelete: 'ask',
+  tempRead: 'allow',
+  tempWrite: 'allow',
+  onlineRead: 'allow',
+  onlineWrite: 'ask',
+  systemRead: 'allow',
+  systemWrite: 'ask',
+  safeDev: 'allow',
+  runScript: 'allow',
+  runExecutable: 'ask',
+  scriptCommands: [],
+  executables: [],
+  other: 'ask',
+}
+
+const AUTO_NEW_MODE_CATEGORY_KEYS = [
+  'recycleBin',
+  'shiftDelete',
+  'tempRead',
+  'tempWrite',
+  'onlineRead',
+  'onlineWrite',
+  'systemRead',
+  'systemWrite',
+  'safeDev',
+  'runScript',
+  'runExecutable',
+  'other',
+] as const satisfies readonly (keyof AutoNewModeConfig)[]
+
+/**
+ * Returns the resolved Auto (New) mode per-category policy, merging from trusted
+ * settings sources only (projectSettings excluded to prevent a malicious project
+ * from widening the "allow" surface). Falls back to AUTO_NEW_MODE_DEFAULTS for any
+ * category not explicitly configured. Always returns a fully-populated config.
+ */
+export function getAutoNewModeConfig(): AutoNewModeConfig {
+  const merged: Record<string, string> = {}
+  for (const source of [
+    'userSettings',
+    'localSettings',
+    'flagSettings',
+    'policySettings',
+  ] as const) {
+    const settings = getSettingsForSource(source)
+    if (!settings) continue
+    const raw = (settings as Record<string, unknown>).autoNewMode
+    if (!raw || typeof raw !== 'object') continue
+    for (const key of AUTO_NEW_MODE_CATEGORY_KEYS) {
+      const value = (raw as Record<string, unknown>)[key]
+      if (
+        value === 'allow' ||
+        value === 'think' ||
+        value === 'ask' ||
+        value === 'thinkToThink'
+      ) {
+        merged[key] = value
+      }
+    }
+    const rawThinkMode = (raw as Record<string, unknown>).thinkMode
+    if (rawThinkMode === '1' || rawThinkMode === '2') {
+      merged.thinkMode = rawThinkMode
+    }
+    const rawDepth = (raw as Record<string, unknown>).thinkDepth
+    if (typeof rawDepth === 'number' && rawDepth >= 1 && rawDepth <= 5) {
+      merged.thinkDepth = String(rawDepth)
+    } else if (typeof rawDepth === 'string') {
+      const parsed = Number.parseInt(rawDepth, 10)
+      if (parsed >= 1 && parsed <= 5) merged.thinkDepth = String(parsed)
+    }
+    const rawScriptCommands = (raw as Record<string, unknown>).scriptCommands
+    if (Array.isArray(rawScriptCommands)) {
+      merged.scriptCommands = rawScriptCommands.filter(
+        (v): v is string => typeof v === 'string',
+      )
+    }
+    const rawExecutables = (raw as Record<string, unknown>).executables
+    if (Array.isArray(rawExecutables)) {
+      merged.executables = rawExecutables.filter(
+        (v): v is string => typeof v === 'string',
+      )
+    }
+  }
+
+  const out: AutoNewModeConfig = { ...AUTO_NEW_MODE_DEFAULTS }
+  for (const key of AUTO_NEW_MODE_CATEGORY_KEYS) {
+    const value = merged[key]
+    if (
+      value === 'allow' ||
+      value === 'think' ||
+      value === 'ask' ||
+      value === 'thinkToThink'
+    ) {
+      ;(out as Record<string, unknown>)[key] = value
+    }
+  }
+  if (merged.thinkMode === '1' || merged.thinkMode === '2') {
+    out.thinkMode = merged.thinkMode
+  }
+  if (merged.thinkDepth) {
+    const depth = Number.parseInt(merged.thinkDepth, 10)
+    if (depth >= 1 && depth <= 5) {
+      out.thinkDepth = depth as AutoNewModeThinkDepth
+    }
+  }
+  if (Array.isArray(merged.scriptCommands)) {
+    out.scriptCommands = merged.scriptCommands
+  }
+  if (Array.isArray(merged.executables)) {
+    out.executables = merged.executables
+  }
+  return out
+}
+
+const AUTO_NEW_MODE_POLICY_VALUES: readonly AutoNewModeCategoryPolicy[] = [
+  'allow',
+  'think',
+  'ask',
+  'thinkToThink',
+]
+
+/**
+ * Persists a partial Auto (New) mode policy to `userSettings.autoNewMode`,
+ * merging with the existing user-settings block. Values are validated: unknown
+ * policies, thinkMode values other than '1'/'2', and out-of-range thinkDepth
+ * are dropped. Returns an error if the write fails.
+ */
+export function setAutoNewModeConfig(
+  partial: Partial<AutoNewModeConfig>,
+): { error: Error | null } {
+  const current =
+    getSettingsForSource('userSettings')?.autoNewMode ?? {}
+  const next: Record<string, unknown> = {
+    ...(current as Record<string, unknown>),
+  }
+
+  for (const key of AUTO_NEW_MODE_CATEGORY_KEYS) {
+    const value = partial[key]
+    if (value === undefined) continue
+    if (
+      typeof value === 'string' &&
+      (AUTO_NEW_MODE_POLICY_VALUES as readonly string[]).includes(value)
+    ) {
+      next[key] = value
+    }
+  }
+
+  if (partial.thinkMode === '1' || partial.thinkMode === '2') {
+    next.thinkMode = partial.thinkMode
+  }
+  if (partial.thinkDepth !== undefined) {
+    const depth = partial.thinkDepth
+    if (
+      typeof depth === 'number' &&
+      Number.isInteger(depth) &&
+      depth >= 1 &&
+      depth <= 5
+    ) {
+      next.thinkDepth = depth
+    }
+  }
+  if (partial.scriptCommands !== undefined) {
+    if (
+      Array.isArray(partial.scriptCommands) &&
+      partial.scriptCommands.every(v => typeof v === 'string')
+    ) {
+      next.scriptCommands = [...partial.scriptCommands]
+    }
+  }
+  if (partial.executables !== undefined) {
+    if (
+      Array.isArray(partial.executables) &&
+      partial.executables.every(v => typeof v === 'string')
+    ) {
+      next.executables = [...partial.executables]
+    }
+  }
+
+  return updateSettingsForSource('userSettings', {
+    autoNewMode: next as unknown as AutoNewModeConfig,
+  })
+}
+
 export function rawSettingsContainsKey(key: string): boolean {
   for (const source of getEnabledSettingSources()) {
     // Skip policySettings - we only care about user-configured settings

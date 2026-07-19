@@ -87,14 +87,21 @@ const PERMISSION_MODE_CONFIG: Partial<
   ...(feature('TRANSCRIPT_CLASSIFIER')
     ? {
         auto: {
-          title: 'Auto mode',
-          shortTitle: 'Auto',
+          title: 'Auto (Legacy) mode',
+          shortTitle: 'Auto(L)',
           symbol: '▶▶',
           color: 'warning' as ModeColorKey,
           external: 'default' as ExternalPermissionMode,
         },
       }
     : {}),
+  autoNew: {
+    title: 'Auto (New) mode',
+    shortTitle: 'Auto+',
+    symbol: '▶▶',
+    color: 'warning' as ModeColorKey,
+    external: 'default' as ExternalPermissionMode,
+  },
 }
 
 /**
@@ -104,11 +111,11 @@ const PERMISSION_MODE_CONFIG: Partial<
 export function isExternalPermissionMode(
   mode: PermissionMode,
 ): mode is ExternalPermissionMode {
-  // External users can't have auto, so always true for them
+  // External users can't have auto/autoNew, so always true for them
   if (process.env.USER_TYPE !== 'ant') {
     return true
   }
-  return mode !== 'auto' && mode !== 'bubble'
+  return mode !== 'auto' && mode !== 'autoNew' && mode !== 'bubble'
 }
 
 function getModeConfig(mode: PermissionMode): PermissionModeConfig {

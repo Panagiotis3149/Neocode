@@ -1,6 +1,6 @@
 import { feature } from 'bun:bundle';
 import * as React from 'react';
-import { memo, type ReactNode, useMemo, useRef } from 'react';
+import { memo, type ReactNode, useMemo, useRef, useState } from 'react';
 import { isBridgeEnabled } from '../../bridge/bridgeEnabled.js';
 import { getBridgeStatus } from '../../bridge/bridgeStatusUtil.js';
 import { useSetPromptOverlay } from '../../context/promptOverlayContext.js';
@@ -23,6 +23,7 @@ import { Notifications } from './Notifications.js';
 import { PromptInputFooterLeftSide } from './PromptInputFooterLeftSide.js';
 import { PromptInputFooterSuggestions, type SuggestionItem } from './PromptInputFooterSuggestions.js';
 import { PromptInputHelpMenu } from './PromptInputHelpMenu.js';
+import { PermissionModeMenu } from '../permissions/rules/PermissionModeMenu.js';
 type Props = {
   apiKeyStatus: VerificationStatus;
   debug: boolean;
@@ -59,6 +60,13 @@ type Props = {
   setHistoryQuery: (query: string) => void;
   historyFailedMatch: boolean;
   onOpenTasksDialog?: (taskId?: string) => void;
+  /** Opens the permission-mode picker menu (Enter on the mode badge / chat:cycleMode). */
+  onOpenModeMenu?: () => void;
+  /** Called when the user picks a mode from the menu. */
+  onSelectMode?: (mode: import('../../utils/permissions/permissionModeOptions.js').ManageablePermissionMode) => void;
+  /** Controlled open state for the mode menu (owned by parent so chat:cycleMode can drive it). */
+  modeMenuOpen?: boolean;
+  setModeMenuOpen?: (open: boolean) => void;
 };
 function PromptInputFooter({
   apiKeyStatus,
@@ -92,9 +100,18 @@ function PromptInputFooter({
   historyQuery,
   setHistoryQuery,
   historyFailedMatch,
-  onOpenTasksDialog
+  onOpenTasksDialog,
+  onOpenModeMenu,
+  onSelectMode,
+  modeMenuOpen: modeMenuOpenProp = false,
+  setModeMenuOpen: setModeMenuOpenProp
 }: Props): ReactNode {
   const settings = useSettings();
+  // Controlled by parent when provided; fall back to self-owned state so the
+  // footer is usable standalone (e.g. tests).
+  const [modeMenuOpenLocal, setModeMenuOpenLocal] = useState(false);
+  const modeMenuOpen = modeMenuOpenProp || modeMenuOpenLocal;
+  const setModeMenuOpen = setModeMenuOpenProp ?? setModeMenuOpenLocal;
   const {
     columns,
     rows
@@ -135,11 +152,26 @@ function PromptInputFooter({
   if (helpOpen) {
     return <PromptInputHelpMenu dimColor={true} fixedWidth={true} paddingX={2} />;
   }
+  if (modeMenuOpen) {
+    return (
+      <Box paddingX={2}>
+        <PermissionModeMenu
+          context={toolPermissionContext}
+          onSelect={mode => {
+            setModeMenuOpen(false);
+            onSelectMode?.(mode);
+          }}
+          onExit={() => setModeMenuOpen(false)}
+          onCancel={() => setModeMenuOpen(false)}
+        />
+      </Box>
+    );
+  }
   return <>
       <Box flexDirection={isNarrow ? 'column' : 'row'} justifyContent={isNarrow ? 'flex-start' : 'space-between'} paddingX={2} gap={isNarrow ? 0 : 1}>
         <Box flexDirection="column" flexShrink={isNarrow ? 0 : 1}>
           {mode === 'prompt' && !isShort && !exitMessage.show && !isPasting && statusLineShouldDisplay(settings) && <StatusLine messagesRef={messagesRef} lastAssistantMessageId={lastAssistantMessageId} vimMode={vimMode} />}
-          <PromptInputFooterLeftSide exitMessage={exitMessage} vimMode={vimMode} mode={mode} toolPermissionContext={toolPermissionContext} suppressHint={suppressHint} isLoading={isLoading} tasksSelected={pillSelected} teamsSelected={teamsSelected} teammateFooterIndex={teammateFooterIndex} tmuxSelected={tmuxSelected} isPasting={isPasting} isSearching={isSearching} historyQuery={historyQuery} setHistoryQuery={setHistoryQuery} historyFailedMatch={historyFailedMatch} onOpenTasksDialog={onOpenTasksDialog} />
+          <PromptInputFooterLeftSide exitMessage={exitMessage} vimMode={vimMode} mode={mode} toolPermissionContext={toolPermissionContext} suppressHint={suppressHint} isLoading={isLoading} tasksSelected={pillSelected} teamsSelected={teamsSelected} teammateFooterIndex={teammateFooterIndex} tmuxSelected={tmuxSelected} isPasting={isPasting} isSearching={isSearching} historyQuery={historyQuery} setHistoryQuery={setHistoryQuery} historyFailedMatch={historyFailedMatch} onOpenTasksDialog={onOpenTasksDialog} onOpenModeMenu={onOpenModeMenu ?? (() => setModeMenuOpen(true))} />
         </Box>
         <Box flexShrink={1} gap={1}>
           {isFullscreen ? null : <Notifications apiKeyStatus={apiKeyStatus} autoUpdaterResult={autoUpdaterResult} debug={debug} isAutoUpdating={isAutoUpdating} verbose={verbose} messages={messages} onAutoUpdaterResult={onAutoUpdaterResult} onChangeIsUpdating={onChangeIsUpdating} ideSelection={ideSelection} mcpClients={mcpClients} isInputWrapped={isInputWrapped} isNarrow={isNarrow} />}

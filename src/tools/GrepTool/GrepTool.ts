@@ -17,7 +17,10 @@ import {
 } from '../../utils/permissions/filesystem.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 import { matchWildcardPattern } from '../../utils/permissions/shellRuleMatching.js'
-import { isAutoAcceptSafeGlobPattern } from '../../utils/permissions/readAutoAcceptGuard.js'
+import {
+  isAutoAcceptSafeGlobPattern,
+  isAutoNewSeededReadPath,
+} from '../../utils/permissions/readAutoAcceptGuard.js'
 import { getGlobExclusionsForPluginCache } from '../../utils/plugins/orphanedPluginFilter.js'
 import { ripGrep } from '../../utils/ripgrep.js'
 import { semanticBoolean } from '../../utils/semanticBoolean.js'
@@ -234,8 +237,31 @@ export const GrepTool = buildTool({
   async checkPermissions(input, context): Promise<PermissionDecision> {
     const appState = context.getAppState()
 
-    // Auto-accept guard: block unsafe patterns/paths before checking auto-allow rules
-    if (input.path && !isAutoAcceptSafeGlobPattern(input.path)) {
+    // Auto-accept guard: block unsafe patterns/paths before checking auto-allow rules.
+    // In non-autoNew modes, the workspace/blocked-dir guard always applies.
+    if (
+      input.path &&
+      appState.toolPermissionContext.mode !== 'autoNew' &&
+      !isAutoAcceptSafeGlobPattern(input.path)
+    ) {
+      return {
+        behavior: 'ask',
+        message: `Neocode requested permissions to grep in ${input.path}, but the path is outside the workspace or matches a blocked directory.`,
+        decisionReason: {
+          type: 'safetyCheck',
+          reason: 'Path is outside allowed workspace or matches blocked system/credential directory',
+        },
+      }
+    }
+
+    // In autoNew mode, additionally allow the seeded temp/ and .claude paths;
+    // everything else is governed by the workspace safety check above.
+    if (
+      input.path &&
+      appState.toolPermissionContext.mode === 'autoNew' &&
+      !isAutoNewSeededReadPath(expandPath(input.path), getCwd()) &&
+      !isAutoAcceptSafeGlobPattern(input.path)
+    ) {
       return {
         behavior: 'ask',
         message: `Neocode requested permissions to grep in ${input.path}, but the path is outside the workspace or matches a blocked directory.`,

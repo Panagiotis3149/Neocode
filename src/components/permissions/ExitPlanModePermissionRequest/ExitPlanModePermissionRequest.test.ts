@@ -48,12 +48,12 @@ describe('buildPlanApprovalOptions', () => {
     })
 
     expect(options[0]).toMatchObject({
-      label: 'Yes, clear context (42% used) and full access',
-      value: 'yes-full-access',
+      label: 'Yes, clear context (42% used) and use Auto (New) mode',
+      value: 'yes-autonew-clear-context',
     })
     expect(options[1]).toMatchObject({
-      label: 'Yes, and full access',
-      value: 'yes-full-access-keep-context',
+      label: 'Yes, clear context (42% used) and full access',
+      value: 'yes-full-access',
     })
   })
 
@@ -69,8 +69,10 @@ describe('buildPlanApprovalOptions', () => {
     })
 
     expect(options.map(option => option.value)).toEqual([
+      'yes-autonew-clear-context',
       'yes-bypass-permissions',
       'yes-full-access',
+      'yes-resume-autonew-mode',
       'yes-bypass-permissions-keep-context',
       'yes-full-access-keep-context',
       'yes-default-keep-context',

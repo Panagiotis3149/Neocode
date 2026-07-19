@@ -5,6 +5,7 @@ import { isProSubscriber, isMaxSubscriber, isTeamSubscriber } from './auth.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
 import { getAPIProvider } from './model/providers.js'
 import { get3PModelCapabilityOverride } from './model/modelSupportOverrides.js'
+import { getUserEffortWireParam } from './effortOverrides.js'
 import { getAntModelOverrideConfig, resolveAntModel } from './model/antModels.js'
 import { supportsCodexReasoningEffort } from '../services/api/providerConfig.js'
 import {
@@ -52,6 +53,7 @@ export type ReasoningControlResolution = {
   levels: EffortLevel[]
   defaultLevel?: EffortValue
   wireFormat?: ReasoningWireFormat
+  customParam?: string
   source: 'metadata' | 'capability' | 'compat' | 'legacy' | 'none'
 }
 
@@ -62,6 +64,9 @@ export type OpenAIShimReasoningRequestPlan = {
   thinkingType?: 'enabled' | 'disabled'
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   wireFormat?: ReasoningWireFormat
+  /** User-configured wire param name (via /effort enable <model|prefix>). When
+   * set, the shim emits reasoning under this field instead of `reasoning_effort`. */
+  customParam?: string
   source: 'metadata' | 'legacy' | 'compat' | 'none'
 }
 
@@ -225,6 +230,14 @@ function resolveCompatibilityWireFormat(
   if (!routeId || routeId === 'anthropic' || routeId === 'openai') {
     return undefined
   }
+  // OpenRouter is the serving provider (the system that actually runs the
+  // model and receives the request), so any model routed there accepts a
+  // top-level `reasoning_effort` param regardless of the underlying model
+  // brand. This is what makes /effort useful for OpenRouter-served models
+  // such as NovitaAI / Nvidia.
+  if (routeId === 'openrouter') {
+    return 'reasoning_effort'
+  }
   if (modelLooksDeepSeekCompatible(model)) {
     return 'deepseek_compatible'
   }
@@ -257,6 +270,30 @@ function resolveCompatibilityReasoningControl(
     context?.routeId,
     useRuntimeFallback,
   )
+
+  // User-configured override (via /effort enable <model|prefix>). This is
+  // explicit and wins over provider heuristics: it makes /effort controllable
+  // for the model and carries the user-chosen wire param name. We route it
+  // through the generic 'reasoning_effort' wire format but stamp customParam so
+  // the shim emits the exact field the user picked (e.g. 'reasoning' for
+  // Nvidia-served, 'reasoning_effort' for NovitaAI-served).
+  const userOverride = getUserEffortWireParam(model)
+  if (userOverride) {
+    if (resolvedRemoveBodyFields?.includes(userOverride)) {
+      return undefined
+    }
+    return {
+      supportsReasoning: true,
+      controllable: true,
+      mode: 'levels',
+      levels: ['low', 'medium', 'high'],
+      defaultLevel: undefined,
+      wireFormat: 'reasoning_effort',
+      customParam: userOverride,
+      source: 'compat',
+    }
+  }
+
   if (!wireFormat) {
     return undefined
   }
@@ -287,6 +324,30 @@ function resolveCompatibilityReasoningControl(
       controllable: true,
       mode: 'levels',
       levels,
+      defaultLevel: undefined,
+      wireFormat,
+      source: 'compat',
+    }
+  }
+
+  if (wireFormat === 'reasoning_effort') {
+    // Serving-provider-level param. Only OpenRouter (the serving provider)
+    // accepts the generic `reasoning_effort` param for arbitrary models; we
+    // scope this here so we never preempt the codex/openai native effort path
+    // (which also uses the 'reasoning_effort' wire format but goes through its
+    // own dedicated resolver). If the provider strips `reasoning_effort` from
+    // the body we report no control.
+    if (context?.routeId !== 'openrouter') {
+      return undefined
+    }
+    if (resolvedRemoveBodyFields?.includes('reasoning_effort')) {
+      return undefined
+    }
+    return {
+      supportsReasoning: true,
+      controllable: true,
+      mode: 'levels',
+      levels: ['low', 'medium', 'high'],
       defaultLevel: undefined,
       wireFormat,
       source: 'compat',
@@ -557,27 +618,41 @@ export function resolveOpenAIShimReasoningRequestPlan(options: {
   thinkingRequestFormat?: OpenAIShimThinkingRequestFormat
   routeId?: string | null
   useRuntimeFallback?: boolean
-  reasoningControl?: Pick<ReasoningControlResolution, 'source' | 'wireFormat' | 'levels'>
+  reasoningControl?: Pick<
+    ReasoningControlResolution,
+    'source' | 'wireFormat' | 'levels' | 'customParam'
+  >
 }): OpenAIShimReasoningRequestPlan {
   const metadataWireFormat = options.reasoningControl?.source === 'metadata'
     ? options.reasoningControl.wireFormat
     : undefined
-  if (metadataWireFormat && !metadataWireFormatSupportsEffort(metadataWireFormat)) {
+  // A user-configured override (via /effort enable <model|prefix>) carries a
+  // `customParam` and resolves to wireFormat 'reasoning_effort'. Because
+  // resolveCompatibilityWireFormat has no knowledge of overrides, re-deriving
+  // it would drop the override on routes that don't otherwise emit
+  // reasoning_effort (e.g. the openai route). So trust the caller's wireFormat
+  // only when an override is present; for normal compat/models we keep
+  // re-deriving from route/model/shimConfig.
+  const wireFormat = options.reasoningControl?.customParam
+    ? options.reasoningControl.wireFormat
+    : metadataWireFormat
+      ? metadataWireFormat
+      : resolveCompatibilityWireFormat(
+        options.model,
+        options.thinkingRequestFormat,
+        options.routeId,
+        options.useRuntimeFallback ?? true,
+      )
+  const source = options.reasoningControl?.source ?? 'compat'
+  if (
+    options.reasoningControl?.source === 'metadata' &&
+    !metadataWireFormatSupportsEffort(wireFormat)
+  ) {
     return {
-      wireFormat: metadataWireFormat,
+      wireFormat,
       source: 'none',
     }
   }
-
-  const wireFormat = metadataWireFormat
-    ? metadataWireFormat
-    : resolveCompatibilityWireFormat(
-      options.model,
-      options.thinkingRequestFormat,
-      options.routeId,
-      options.useRuntimeFallback ?? true,
-    )
-  const source = metadataWireFormat ? 'metadata' : 'compat'
   const requestedThinkingType = normalizeReasoningThinkingType(
     options.requestThinkingType,
   )
@@ -625,6 +700,15 @@ export function resolveOpenAIShimReasoningRequestPlan(options: {
       thinkingType: shouldEnableThinking ? 'enabled' : undefined,
       reasoningEffort,
       wireFormat,
+      source,
+    }
+  }
+
+  if (wireFormat === 'reasoning_effort') {
+    return {
+      reasoningEffort: options.requestedEffort,
+      wireFormat,
+      customParam: options.reasoningControl?.customParam,
       source,
     }
   }

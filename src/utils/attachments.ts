@@ -1,4 +1,5 @@
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
+import { Semaphore, mapWithConcurrency } from './boundedAsync.js'
 import {
   logEvent,
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -276,6 +277,10 @@ const MAX_MEMORY_LINES = 200
 // most-relevant memory still surfaces: the frontmatter + opening context
 // is usually what matters.
 const MAX_MEMORY_BYTES = 4096
+// Bounds concurrent filesystem reads when expanding @-mentioned files so a
+// single input with many @mentions doesn't open them all at once.
+const FLAT_FILE_READ_CONCURRENCY = 24
+const mentionSemaphore = new Semaphore(FLAT_FILE_READ_CONCURRENCY)
 
 export const RELEVANT_MEMORIES_CONFIG = {
   // Per-turn cap (5 × 4KB = 20KB) bounds a single injection, but over a
@@ -1900,8 +1905,10 @@ async function processAtMentionedFiles(
   if (files.length === 0) return []
 
   const appState = toolUseContext.getAppState()
-  const results = await Promise.all(
-    files.map(async file => {
+  const results = await mapWithConcurrency(
+    files,
+    FLAT_FILE_READ_CONCURRENCY,
+    async file => {
       try {
         const { filename, lineStart, lineEnd } = parseAtMentionedFileLines(file)
         const absoluteFilename = expandPath(filename)
@@ -1959,7 +1966,7 @@ async function processAtMentionedFiles(
       } catch {
         logEvent('tengu_at_mention_extracting_filename_error', {})
       }
-    }),
+    },
   )
   return results.filter(Boolean) as Attachment[]
 }
@@ -2068,8 +2075,10 @@ export async function getChangedFiles(
   if (filePaths.length === 0) return []
 
   const appState = toolUseContext.getAppState()
-  const results = await Promise.all(
-    filePaths.map(async filePath => {
+  const results = await mapWithConcurrency(
+    filePaths,
+    FLAT_FILE_READ_CONCURRENCY,
+    async filePath => {
       const fileState = toolUseContext.readFileState.get(filePath)
       if (!fileState) return null
 
@@ -2156,7 +2165,7 @@ export async function getChangedFiles(
         }
         return null
       }
-    }),
+    },
   )
   return results.filter(result => result != null) as Attachment[]
 }

@@ -775,12 +775,14 @@ export function getEffectiveDefaultPermissionModeFromSettingsSources(
       continue
     }
 
-    if (
-      source === 'projectSettings' &&
-      isDangerousDefaultPermissionMode(defaultMode)
-    ) {
+    // Dangerous modes (bypassPermissions / fullAccess) must never be the
+    // default/persisted mode. This is a hard constraint: a bypass mode could
+    // otherwise be silently applied on startup with no confirmation, defeating
+    // the double-verify gate. Reject it from every settings source (project,
+    // user, enterprise) so it can only ever be enabled interactively.
+    if (isDangerousDefaultPermissionMode(defaultMode)) {
       logForDebugging(
-        `Ignoring project settings defaultMode "${defaultMode}" because dangerous default modes must come from a trusted source`,
+        `Ignoring defaultMode "${defaultMode}" from ${source} because dangerous default modes must be enabled interactively, never set as a persisted default`,
         { level: 'warn' },
       )
       continue
@@ -1402,6 +1404,24 @@ export function isAutoModeGateEnabled(): boolean {
   if (autoModeStateModule?.isAutoModeCircuitBroken() ?? false) return false
   if (isAutoModeDisabledBySettings()) return false
   if (!modelSupportsAutoMode(getMainLoopModel())) return false
+  return true
+}
+
+/**
+ * Whether the given mode is the Auto (New) autonomous mode. Auto (New) does NOT
+ * use the classifier/auto-mode state machine — it drives decisions purely from
+ * the per-category `permissions.autoNewMode` policy. It is available for any
+ * build (non-gated) and any model.
+ */
+export function isAutoNewMode(mode: string | undefined): boolean {
+  return mode === 'autoNew'
+}
+
+/**
+ * Whether the user can switch into Auto (New) mode (ad-hoc). It is never a
+ * persisted default, but always switchable once opted in.
+ */
+export function isAutoNewModeAvailable(): boolean {
   return true
 }
 

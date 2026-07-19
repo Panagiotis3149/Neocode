@@ -106,7 +106,7 @@ const externalTips: Tip[] = [
   {
     id: 'plan-mode-for-complex-tasks',
     content: async () =>
-      `Use Plan Mode to prepare for a complex request before making changes. Press ${getShortcutDisplay('chat:cycleMode', 'Chat', 'shift+tab')} twice to enable.`,
+      `Use Plan Mode to prepare for a complex request before making changes. Press ${getShortcutDisplay('chat:cycleMode', 'Chat', 'Enter')} to open the mode menu, then pick Plan Mode.`,
     cooldownSessions: 5,
     isRelevant: async () => {
       const config = getGlobalConfig()
@@ -400,7 +400,7 @@ const externalTips: Tip[] = [
   {
     id: 'shift-tab',
     content: async () =>
-      `Hit ${getShortcutDisplay('chat:cycleMode', 'Chat', 'shift+tab')} to cycle between default mode, auto-accept edit mode, and plan mode`,
+      `Hit ${getShortcutDisplay('chat:cycleMode', 'Chat', 'Enter')} to open the mode menu and pick default mode, auto-accept edit mode, plan mode, or more`,
     cooldownSessions: 10,
     isRelevant: async () => true,
   },
@@ -463,7 +463,7 @@ const externalTips: Tip[] = [
   {
     id: 'opusplan-mode-reminder',
     content: async () =>
-      `Your default model setting is Opus Plan Mode. Press ${getShortcutDisplay('chat:cycleMode', 'Chat', 'shift+tab')} twice to activate Plan Mode and plan with Opus.`,
+      `Your default model setting is Opus Plan Mode. Press ${getShortcutDisplay('chat:cycleMode', 'Chat', 'Enter')} to open the mode menu, then pick Plan Mode.`,
     cooldownSessions: 2,
     async isRelevant() {
       const config = getGlobalConfig()

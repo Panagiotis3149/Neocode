@@ -125,7 +125,7 @@ function ProactiveCountdown() {
   return t4;
 }
 export function PromptInputFooterLeftSide(t0) {
-  const $ = _c(27);
+  const $ = _c(28);
   const {
     exitMessage,
     vimMode,
@@ -142,7 +142,8 @@ export function PromptInputFooterLeftSide(t0) {
     historyQuery,
     setHistoryQuery,
     historyFailedMatch,
-    onOpenTasksDialog
+    onOpenTasksDialog,
+    onOpenModeMenu
   } = t0;
   if (exitMessage.show) {
     let t1;
@@ -196,8 +197,8 @@ export function PromptInputFooterLeftSide(t0) {
   }
   const t4 = !suppressHint && !showVim;
   let t5;
-  if ($[13] !== isLoading || $[14] !== mode || $[15] !== onOpenTasksDialog || $[16] !== t4 || $[17] !== tasksSelected || $[18] !== teammateFooterIndex || $[19] !== teamsSelected || $[20] !== tmuxSelected || $[21] !== toolPermissionContext) {
-    t5 = <ModeIndicator mode={mode} toolPermissionContext={toolPermissionContext} showHint={t4} isLoading={isLoading} tasksSelected={tasksSelected} teamsSelected={teamsSelected} teammateFooterIndex={teammateFooterIndex} tmuxSelected={tmuxSelected} onOpenTasksDialog={onOpenTasksDialog} />;
+  if ($[13] !== isLoading || $[14] !== mode || $[15] !== onOpenTasksDialog || $[16] !== t4 || $[17] !== tasksSelected || $[18] !== teammateFooterIndex || $[19] !== teamsSelected || $[20] !== tmuxSelected || $[21] !== toolPermissionContext || $[22] !== onOpenModeMenu) {
+    t5 = <ModeIndicator mode={mode} toolPermissionContext={toolPermissionContext} showHint={t4} isLoading={isLoading} tasksSelected={tasksSelected} teamsSelected={teamsSelected} teammateFooterIndex={teammateFooterIndex} tmuxSelected={tmuxSelected} onOpenTasksDialog={onOpenTasksDialog} onOpenModeMenu={onOpenModeMenu} />;
     $[13] = isLoading;
     $[14] = mode;
     $[15] = onOpenTasksDialog;
@@ -233,6 +234,7 @@ type ModeIndicatorProps = {
   tmuxSelected: boolean;
   teammateFooterIndex?: number;
   onOpenTasksDialog?: (taskId?: string) => void;
+  onOpenModeMenu?: () => void;
 };
 function ModeIndicator({
   mode,
@@ -243,12 +245,13 @@ function ModeIndicator({
   teamsSelected,
   tmuxSelected,
   teammateFooterIndex,
-  onOpenTasksDialog
+  onOpenTasksDialog,
+  onOpenModeMenu
 }: ModeIndicatorProps): React.ReactNode {
   const {
     columns
   } = useTerminalSize();
-  const modeCycleShortcut = useShortcutDisplay('chat:cycleMode', 'Chat', 'shift+tab');
+  const modeCycleShortcut = useShortcutDisplay('chat:cycleMode', 'Chat', 'Enter');
   const tasks = useAppState(s => s.tasks);
   const teamContext = useAppState(s_0 => s_0.teamContext);
   // Set once in initialState (main.tsx --remote mode) and never mutated — lazy
@@ -309,6 +312,8 @@ function ModeIndicator({
     }
   }, [voiceEnabled, voiceHintUnderCap]);
   const isKillAgentsConfirmShowing = useAppState(s_7 => s_7.notifications.current?.key === 'kill-agents-confirm');
+  const pendingWorkerRequest = useAppState(s_8 => s_8.pendingWorkerRequest);
+  const pendingAutoNewAttention = useAppState(s_8 => s_8.pendingAutoNewAttention);
 
   // Derive team info from teamContext (no filesystem I/O needed)
   // Match the same logic as TeamStatus to avoid trailing separator
@@ -345,12 +350,26 @@ function ModeIndicator({
   // the local permission mode shown here doesn't reflect the agent's state.
   // Rendered before the tasks pill so a long pill label (e.g. ultraplan URL)
   // doesn't push the mode indicator off-screen.
-  const modePart = currentMode && hasActiveMode && !getIsRemoteMode() ? <Text color={getModeColor(currentMode)} key="mode">
+  const isDangerousMode =
+    currentMode === 'bypassPermissions' || currentMode === 'fullAccess'
+  const bypassBadge = isDangerousMode && hasActiveMode && !getIsRemoteMode() ? <Text color="error" bold key="bypass">
+        {'⚠ BYPASS '}
+      </Text> : null;
+  // Auto (New) attention banner: shown (amber, non-OS) whenever the agent is in
+  // Auto (New) mode and is currently paused on a permission request that it needs
+  // the user to resolve. Purely a lightweight TUI signal — no OS notification.
+  const autoNewAttention =
+    currentMode === 'autoNew' && hasActiveMode && !getIsRemoteMode() && pendingAutoNewAttention
+      ? <Text color="warning" bold key="autoNewAttention">
+          {'⚠ ATTENTION '}
+        </Text>
+      : null;
+  const modePart = currentMode && hasActiveMode && !getIsRemoteMode() ? <Text color={getModeColor(currentMode)} key="mode" onClick={() => onOpenModeMenu?.()}>
         {permissionModeSymbol(currentMode)}{' '}
         {permissionModeTitle(currentMode).toLowerCase()} on
         {shouldShowModeHint && <Text dimColor>
             {' '}
-            <KeyboardShortcutHint shortcut={modeCycleShortcut} action="cycle" parens />
+            <KeyboardShortcutHint shortcut={modeCycleShortcut} action="menu" parens />
           </Text>}
       </Text> : null;
 
@@ -461,13 +480,15 @@ function ModeIndicator({
   // part (e.g. the selection copy/native-select hints) grow the column
   // from 0→1 row. Always render 1 row in fullscreen; return a space when
   // empty so Yoga reserves the row without painting anything visible.
-  if (parts.length === 0 && !tasksPart && !modePart) {
+  if (parts.length === 0 && !tasksPart && !modePart && !bypassBadge && !autoNewAttention) {
     return isFullscreenEnvEnabled() ? <Text> </Text> : null;
   }
 
   // flexShrink=0 keeps mode + pill at natural width; the remaining parts
   // truncate at the tail as one string inside the Text wrapper.
   return <Box height={1} overflow="hidden">
+      {bypassBadge}
+      {autoNewAttention}
       {modePart && <Box flexShrink={0}>
           {modePart}
           {(tasksPart || parts.length > 0) && <Text dimColor> · </Text>}

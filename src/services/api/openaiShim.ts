@@ -93,6 +93,7 @@ import {
   getStreamStats,
 } from '../../utils/streamingOptimizer.js'
 import { stableStringifyJson } from '../../utils/stableStringify.js'
+import { getMergedRequestExtras, deepMergeInto } from '../../utils/requestExtras.js'
 
 type SecretValueSource = Partial<{
   OPENAI_API_KEY: string
@@ -929,6 +930,61 @@ function convertChunkUsage(
   )
 }
 
+// Pulls a final `usage` object out of a *complete* (non-incrementally-decoded)
+// response body. Handles both SSE bodies (`data: {...}` lines with `usage` on
+// the last/chunk rows) and a bare JSON object. Returns an Anthropic-shaped
+// partial usage, or undefined when no usage is present. Used as the fallback
+// for providers that don't emit an in-stream usage chunk.
+function extractUsageFromRawBody(
+  raw: string,
+): Partial<AnthropicUsage> | undefined {
+  if (!raw || !raw.trim()) return undefined
+
+  let found: Record<string, unknown> | undefined
+
+  // SSE: scan each `data:` line for a JSON object carrying `usage`. The last
+  // such line wins, since providers typically attach usage to the final delta.
+  const sseLines = raw.split('\n')
+  for (const line of sseLines) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('data:')) continue
+    const payload = trimmed.slice('data:'.length).trim()
+    if (!payload || payload === '[DONE]') continue
+    try {
+      const parsed = JSON.parse(payload)
+      if (parsed && typeof parsed === 'object' && 'usage' in parsed) {
+        found = parsed.usage as Record<string, unknown>
+      }
+    } catch {
+      // Not JSON / not a complete object on this line — keep going.
+    }
+  }
+
+  // Bare JSON object (non-SSE) with `usage` at the top level. Some local
+  // providers append a trailing usage object as a plain JSON line (no `data:`
+  // prefix) after the SSE stream. Scan each line individually for a `usage`
+  // field, since the whole body is not itself a single JSON document.
+  if (!found) {
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (parsed && typeof parsed === 'object' && 'usage' in parsed) {
+          found = parsed.usage as Record<string, unknown>
+        }
+      } catch {
+        // Not a JSON object on this line — keep going.
+      }
+    }
+  }
+
+  if (!found) return undefined
+  return convertChunkUsage(
+    found as unknown as OpenAIStreamChunk['usage'],
+  )
+}
+
 const JSON_REPAIR_SUFFIXES = [
   '}', '"}', ']}', '"]}', '}}', '"}}', ']}}', '"]}}', '"]}]}', '}]}'
 ]
@@ -1295,6 +1351,14 @@ async function* openaiStreamToAnthropic(
     },
   }
 
+  // Track the last `usage` object emitted in-stream so the final-usage
+  // fallback has it without buffering the whole body. For SSE streams this is
+  // the typical path: the provider attaches `usage` to the final data line and
+  // we capture it here, removing the need to clone the full (potentially very
+  // large) response for the duration of the turn. Only the small usage object
+  // is retained, not the response body.
+  let lastChunkUsage: Partial<AnthropicUsage> | undefined
+
   const reader = response.body?.getReader()
   if (!reader) return
 
@@ -1474,6 +1538,11 @@ async function* openaiStreamToAnthropic(
       }
 
       const chunkUsage = convertChunkUsage(chunk.usage)
+      // Retain the raw usage object (small) for the non-include_usage
+      // fallback below — avoids buffering the entire response body.
+      if (chunk.usage) {
+        lastChunkUsage = chunk.usage as Partial<AnthropicUsage>
+      }
 
       for (const choice of chunk.choices ?? []) {
         const delta = choice.delta
@@ -1783,6 +1852,55 @@ async function* openaiStreamToAnthropic(
     reader.releaseLock()
   }
 
+  // Final-usage fallback: if the stream closed without ever yielding a usage
+  // chunk (some local providers ignore `stream_options.include_usage` and
+  // instead attach `usage` to the *last* data line or a non-SSE body),
+  // synthesize usage so token counts / cost tracking don't silently report 0.
+  //
+  // Leak note: we do NOT `response.clone().text()` for SSE streams — that would
+  // buffer the entire (potentially huge) response body for the whole turn for
+  // every request. Instead `lastChunkUsage` already captures the in-stream
+  // `usage` object as it flies past (zero body retention). We only fall back to
+  // reading the raw body for non-SSE responses (single small JSON completion,
+  // not a long generation), where cloning is bounded.
+  if (!hasEmittedFinalUsage) {
+    try {
+      let usage: ReturnType<typeof extractUsageFromRawBody> = null
+
+      if (lastChunkUsage) {
+        usage = convertChunkUsage(lastChunkUsage)
+      } else {
+        const contentType = response.headers?.get('content-type') ?? ''
+        const isSSE = contentType.includes('text/event-stream') ||
+          contentType.includes('stream')
+        if (!isSSE) {
+          // Non-SSE (bare JSON) provider: body is a single small completion,
+          // safe to clone + read. SSE bodies are intentionally NOT cloned here.
+          usage = extractUsageFromRawBody(await response.clone().text())
+        }
+      }
+
+      if (usage) {
+        // Close any open content block before emitting the final delta.
+        if (hasEmittedContentStart && !hasClosedThinking) {
+          yield* closeActiveContentBlock()
+        }
+        yield {
+          type: 'message_delta',
+          delta: {
+            stop_reason: lastStopReason ?? 'end_turn',
+            stop_sequence: null,
+          },
+          usage,
+        }
+        hasEmittedFinalUsage = true
+      }
+    } catch {
+      // Best-effort: if the buffered read fails, leave usage as the
+      // message_start default (0s) rather than breaking the whole stream.
+    }
+  }
+
   const stats = getStreamStats(streamState)
   if (stats.totalChunks > 0) {
     logForDebugging(
@@ -2083,7 +2201,12 @@ class OpenAIShimMessages {
       thinkingRequestFormat: shimConfig.thinkingRequestFormat,
       routeId: runtimeShimContext.routeId,
       useRuntimeFallback: false,
-      reasoningControl,
+      reasoningControl: reasoningControl && {
+        source: reasoningControl.source,
+        wireFormat: reasoningControl.wireFormat,
+        levels: reasoningControl.levels,
+        customParam: reasoningControl.customParam,
+      },
     })
 
     const body: Record<string, unknown> = {
@@ -2096,7 +2219,9 @@ class OpenAIShimMessages {
      // request carries a reasoning effort (set via /effort, model alias default,
      // or `?reasoning=<level>` query on the model string). OpenAI, Codex, and
      // most OpenAI-compatible endpoints read it from this top-level field.
-    if (request.reasoning) {
+    // Skip when the user configured a custom wire param — that branch emits the
+    // user-chosen field instead, and we must not also send `reasoning_effort`.
+    if (request.reasoning && !reasoningRequestPlan.customParam) {
       body.reasoning_effort = request.reasoning.effort
     }
     // Convert max_tokens to max_completion_tokens for OpenAI API compatibility.
@@ -2115,7 +2240,12 @@ class OpenAIShimMessages {
       body.max_completion_tokens = maxCompletionTokensValue
     }
 
-    if (params.stream && !isLocalProviderUrl(request.baseUrl)) {
+    // Require a final usage chunk for ALL streaming providers (including local
+    // ones) so token counts aren't dropped. Previously local providers were
+    // excluded here, which left usage at 0 and under-counted cost. The
+    // streaming loop also buffers the body to read usage if a provider omits
+    // the usage chunk despite this flag.
+    if (params.stream) {
       body.stream_options = { include_usage: true }
     }
 
@@ -2142,6 +2272,18 @@ class OpenAIShimMessages {
 
     for (const field of shimConfig.removeBodyFields ?? []) {
       delete body[field]
+    }
+
+    // Apply user-defined raw-JSON request-body overrides (e.g. arbitrary
+    // nested provider params like extra_body.chat_template_kwargs). These are
+    // deep-merged AFTER field-stripping so the user's extras are authoritative,
+    // and the "$reasoning_effort" placeholder is replaced with the resolved
+    // effort level. Scope: exact model id, prefix ("tencent/*"), or global "*".
+    const mergedExtras = getMergedRequestExtras(request.resolvedModel, {
+      reasoningEffort: request.reasoning?.effort,
+    })
+    if (mergedExtras && Object.keys(mergedExtras).length > 0) {
+      deepMergeInto(body, mergedExtras)
     }
 
     if (shouldStripResponsesStore) {
@@ -2173,9 +2315,23 @@ class OpenAIShimMessages {
       }
     }
 
+    // User-configured override (via /effort enable <model|prefix>): emit the
+    // user-chosen wire param name instead of the fixed reasoning_effort field.
+    if (
+      reasoningRequestPlan.customParam &&
+      reasoningRequestPlan.reasoningEffort
+    ) {
+      body[reasoningRequestPlan.customParam] =
+        reasoningRequestPlan.reasoningEffort
+    }
+
     // Route/model strip rules are authoritative even when compatibility
     // serializers add provider-specific reasoning fields later in the pipeline.
-    for (const field of shimConfig.removeBodyFields ?? []) {
+    // The user's explicit override param is the one exception: if they asked to
+    // send `body[customParam]`, we must not strip it.
+    const stripFields = shimConfig.removeBodyFields ?? []
+    for (const field of stripFields) {
+      if (field === reasoningRequestPlan.customParam) continue
       delete body[field]
     }
 
@@ -2782,11 +2938,48 @@ class OpenAIShimMessages {
         // stream_options: { include_usage: true } and can be extracted from the stream.
         if (!params.stream) {
           try {
-            const clone = response.clone()
-            const data = await clone.json()
+            const bodyText = await response.text()
+            // Preserve routing metadata that `new Response()` drops to "".
+            // create() reads `response.url` to route between /responses,
+            // /messages, and Gemini conversion paths; losing it makes
+            // descriptor routes (OpenCode /messages, Gemini /models/gemini-*)
+            // fall through to the generic OpenAI converter and return the
+            // wrong message shape. `url` is a read-only getter on the
+            // prototype, so shadow it with an own property.
+            const originalUrl = response.url
+            const originalType = response.type
+            // Recreate the response immediately after reading the body, before
+            // JSON.parse — if parsing fails, downstream code can still read the
+            // body from the fresh Response instead of hitting "Body already used".
+            response = new Response(bodyText, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: response.headers,
+            })
+            if (originalUrl) {
+              try {
+                Object.defineProperty(response, 'url', {
+                  value: originalUrl,
+                  configurable: true,
+                })
+              } catch {
+                /* some runtimes lock the property; routing falls back to transport */
+              }
+            }
+            if (originalType && originalType !== 'basic') {
+              try {
+                Object.defineProperty(response, 'type', {
+                  value: originalType,
+                  configurable: true,
+                })
+              } catch {
+                /* non-fatal: type is not used for response routing */
+              }
+            }
+            const data = JSON.parse(bodyText)
             tokensIn = data.usage?.prompt_tokens ?? 0
             tokensOut = data.usage?.completion_tokens ?? 0
-          } catch { /* ignore */ }
+          } catch { /* ignore — response is already recreated with the body intact */ }
         }
         logApiCallEnd(correlationId, startTime, request.resolvedModel, 'success', tokensIn, tokensOut, false)
         return response

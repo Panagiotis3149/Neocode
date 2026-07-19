@@ -7,6 +7,10 @@ import { spawn } from 'cross-spawn'
 import path from 'node:path'
 import { getCwd } from '../utils/cwd.js'
 import { logError } from './log.js'
+import {
+  registerTrackedChild,
+  unregisterTrackedChild,
+} from './childReaper.js'
 
 export { execSyncWithDefaults_DEPRECATED } from './execFileNoThrowPortable.js'
 
@@ -237,6 +241,9 @@ export function execFileNoThrowWithCwd(
         return
       }
       settled = true
+      if (child.pid) {
+        unregisterTrackedChild(child.pid)
+      }
       void resolve(result)
     }
 
@@ -268,6 +275,9 @@ export function execFileNoThrowWithCwd(
     child.stderr?.on('data', chunk => appendOutput(chunk, 'stderr'))
 
     child.once('spawn', () => {
+      if (child.pid) {
+        registerTrackedChild(child.pid, `${file} ${args.join(' ')}`.slice(0, 200))
+      }
       if (stdinMode === 'pipe' && child.stdin) {
         if (finalInput !== undefined) {
           child.stdin.end(finalInput)

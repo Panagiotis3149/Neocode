@@ -69,7 +69,10 @@ import {
   checkReadPermissionForTool,
   matchingRuleForInput,
 } from '../../utils/permissions/filesystem.js'
-import { isAutoAcceptBlockedPath } from '../../utils/permissions/readAutoAcceptGuard.js'
+import {
+  isAutoAcceptBlockedPath,
+  isAutoNewSeededReadPath,
+} from '../../utils/permissions/readAutoAcceptGuard.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 import { matchWildcardPattern } from '../../utils/permissions/shellRuleMatching.js'
 import { readFileInRange } from '../../utils/readFileInRange.js'
@@ -400,9 +403,17 @@ export const FileReadTool = buildTool({
   async checkPermissions(input, context): Promise<PermissionDecision> {
     const appState = context.getAppState()
 
-    // Check if auto-accept should be blocked for this path
+    // Check if auto-accept should be blocked for this path.
+    // In Autonomous (autoNew) mode, read/search access is scoped to the
+    // *specific* workspace temp/ and .claude directories — reads there bypass
+    // the sensitive-path guard, but every other path falls through to the
+    // normal (workspace-gated) permission policy rather than getting a blanket
+    // waiver.
     const fullFilePath = expandPath(input.file_path)
-    if (isAutoAcceptBlockedPath(fullFilePath)) {
+    if (
+      !isAutoNewSeededReadPath(fullFilePath, getCwd()) &&
+      isAutoAcceptBlockedPath(fullFilePath)
+    ) {
       return {
         behavior: 'ask',
         message: `${PRODUCT_DISPLAY_NAME} requested permissions to read from ${input.file_path}, but you haven't granted it yet.`,

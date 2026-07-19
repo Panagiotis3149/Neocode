@@ -248,7 +248,11 @@ export async function handlePromptSubmit(
     if (
       immediateCommand &&
       immediateCommand.type === 'local-jsx' &&
-      (queryGuard.isActive || isExternalLoading)
+      // Local-jsx commands only mount UI and never enqueue a query, so they
+      // always run immediately (including when the prompt is idle). The
+      // queryGuard/isExternalLoading condition still matters for non-jsx
+      // immediate commands, which must not run mid-query.
+      (immediateCommand.immediate || queryGuard.isActive || isExternalLoading)
     ) {
       logEvent('tengu_immediate_command_executed', {
         commandName:

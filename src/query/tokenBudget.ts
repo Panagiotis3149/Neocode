@@ -1,7 +1,11 @@
-import { getBudgetContinuationMessage } from '../utils/tokenBudget.js'
+import { getBudgetContinuationMessage, type TokenBudgetMode } from '../utils/tokenBudget.js'
 
 const COMPLETION_THRESHOLD = 0.9
 const DIMINISHING_THRESHOLD = 500
+// A cap ("less than N tokens") must stay UNDER the limit, so we stop well
+// before reaching it (rather than nudging up to ~90% like a target), and we
+// never tell the model to keep going just to reach the cap.
+const CAP_STOP_THRESHOLD = 0.85
 
 export type BudgetTracker = {
   continuationCount: number
@@ -47,6 +51,7 @@ export function checkTokenBudget(
   agentId: string | undefined,
   budget: number | null,
   globalTurnTokens: number,
+  mode: TokenBudgetMode = 'target',
 ): TokenBudgetDecision {
   if (agentId || budget === null || budget <= 0) {
     return { action: 'stop', completionEvent: null }
@@ -60,6 +65,22 @@ export function checkTokenBudget(
     tracker.continuationCount >= 3 &&
     deltaSinceLastCheck < DIMINISHING_THRESHOLD &&
     tracker.lastDeltaTokens < DIMINISHING_THRESHOLD
+
+  // A cap is a hard ceiling. Never nudge the model to keep going to "fill up"
+  // to the limit — that would push past it. Stop as soon as the cap is set.
+  if (mode === 'cap') {
+    return {
+      action: 'stop',
+      completionEvent: {
+        continuationCount: tracker.continuationCount,
+        pct,
+        turnTokens,
+        budget,
+        diminishingReturns: isDiminishing,
+        durationMs: Date.now() - tracker.startedAt,
+      },
+    }
+  }
 
   if (!isDiminishing && turnTokens < budget * COMPLETION_THRESHOLD) {
     tracker.continuationCount++

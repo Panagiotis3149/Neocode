@@ -66,6 +66,16 @@ import {
 import { getPlatform } from '../../utils/platform.js'
 import { SandboxManager } from '../../utils/sandbox/sandbox-adapter.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
+import {
+  getAutoNewModeConfig,
+  type AutoNewModeCategoryPolicy,
+} from '../../utils/settings/settings.js'
+import {
+  classifyAutoNewCategory,
+  isCommandWithinWorkspace,
+  SENSITIVE_AUTO_NEW_CATEGORIES,
+  type AutoNewCategory,
+} from '../../utils/permissions/autoNewCategories.js'
 import { windowsPathToPosixPath } from '../../utils/windowsPaths.js'
 import { BashTool } from './BashTool.js'
 import { checkCommandOperatorPermissions } from './bashCommandHelpers.js'
@@ -77,6 +87,17 @@ import { checkPermissionMode } from './modeValidation.js'
 import { checkPathConstraints } from './pathValidation.js'
 import { checkSedConstraints } from './sedValidation.js'
 import { shouldUseSandbox } from './shouldUseSandbox.js'
+import { getMainLoopModel } from '../../utils/model/model.js'
+
+// TEMP DEBUG (NEOCODE_AUTO_DEBUG): lazily require the auto-mode flag module so
+// the diagnostic can report whether the non-reactive autoModeActive signal is
+// set at bash decision time. Lazy require mirrors the rest of the codebase.
+const autoModeStateModule =
+  typeof require !== 'undefined'
+    ? (require('../../utils/permissions/autoModeState.js') as {
+        isAutoModeActive?: () => boolean
+      })
+    : undefined
 
 // DCE cliff: Bun's feature() evaluator has a per-function complexity budget.
 // bashToolHasPermission is right at the limit. `import { X as Y }` aliases
@@ -159,6 +180,13 @@ export function getSimpleCommandPrefix(command: string): string | null {
 
   const remaining = tokens.slice(i)
   if (remaining.length < 2) return null
+  // SECURITY: never generate a prefix rule whose base command is a bare shell
+  // or a privilege-escalation / wrapper prefix (sh, bash, env, sudo, doas,
+  // pkexec, xargs, nice, ...). Otherwise `sudo ls` would produce Bash(sudo ls:*)
+  // (auto-approving every future `sudo ls`), and `env bash -c` would produce
+  // Bash(env bash:*). getFirstWordPrefix already enforces this for its branch,
+  // but getSimpleCommandPrefix reached here first for 2-token commands.
+  if (BARE_SHELL_PREFIXES.has(remaining[0]!)) return null
   const subcmd = remaining[1]!
   // Second token must look like a subcommand (e.g., "commit", "run", "compose"),
   // not a flag (-rf), filename (file.txt), path (/tmp), URL, or number (755).
@@ -242,7 +270,7 @@ export function getFirstWordPrefix(command: string): string | null {
   return cmd
 }
 
-function suggestionForExactCommand(command: string): PermissionUpdate[] {
+export function suggestionForExactCommand(command: string): PermissionUpdate[] {
   // Heredoc commands contain multi-line content that changes each invocation,
   // making exact-match rules useless (they'll never match again). Extract a
   // stable prefix before the heredoc operator and suggest a prefix rule instead.
@@ -268,6 +296,18 @@ function suggestionForExactCommand(command: string): PermissionUpdate[] {
   const prefix = getSimpleCommandPrefix(command)
   if (prefix) {
     return sharedSuggestionForPrefix(BashTool.name, prefix)
+  }
+
+  // Bug #2 fix: when the 2nd token is a flag/file/subcommand-UNLIKE word
+  // (e.g. `ls -la`, `cat file.txt`, `git status`), getSimpleCommandPrefix
+  // returns null and we previously fell back to an *exact* rule. That rule
+  // never matches subsequent invocations with different args, so the user is
+  // re-prompted for "similar" commands. Use the first word as a prefix rule
+  // instead. getFirstWordPrefix blocks bare shells / wrappers / unsafe env
+  // vars, so no dangerous Bash(sh:*) / Bash(env:*) rule is ever generated.
+  const firstWord = getFirstWordPrefix(command)
+  if (firstWord) {
+    return sharedSuggestionForPrefix(BashTool.name, firstWord)
   }
 
   return sharedSuggestionForExactCommand(BashTool.name, command)
@@ -1135,6 +1175,13 @@ export const bashToolCheckPermission = (
 
   // 7. Check read-only rules
   if (BashTool.isReadOnly(input)) {
+    // Bug #2 fix: read-only commands previously returned `allow` without any
+    // `suggestions`, so the permission dialog had nothing to persist and the
+    // user was re-prompted for similar commands (e.g. `ls -la` -> `ls -la /tmp`).
+    // Attach a suggestion so "allow for this (session/always)" persists a rule
+    // that matches future invocations. suggestionForExactCommand already falls
+    // back to a first-word prefix (getFirstWordPrefix) for flag/file 2nd tokens,
+    // which blocks dangerous Bash(sh:*)/Bash(env:*) rules.
     return {
       behavior: 'allow',
       updatedInput: input,
@@ -1142,6 +1189,7 @@ export const bashToolCheckPermission = (
         type: 'other',
         reason: 'Read-only command is allowed',
       },
+      suggestions: suggestionForExactCommand(command),
     }
   }
 
@@ -1460,6 +1508,118 @@ function checkSemanticsDeny(
     }
   }
   return null
+}
+
+/**
+ * Reflection prompts used by the Auto (New) `think` policy. Distinct per
+ * thinkMode (persisted user choice):
+ *  - mode 1: "is this really needed?" — surfaced to the user; model reflects then still asks.
+ *  - mode 2: "is this safe enough?" — internal; model reflects then proceeds silently.
+ */
+export const AUTO_NEW_THINK_REFLECT_PROMPTS = {
+  '1': 'Before acting, reflect briefly: "Is this command really needed to accomplish the user\'s request, or is there a safer alternative?" Then surface the permission prompt as usual.',
+  '2': 'Before acting, reflect briefly: "Is this command safe enough to run without asking the user?" If so, proceed silently without prompting.',
+} as const
+
+/**
+ * Auto (New) mode decision flow. Hard denials always win. Otherwise the command
+ * is classified into a per-category bucket and the resolved per-category policy
+ * (allow / think / ask / thinkToThink) determines the result:
+ *  - allow: permit immediately (still subject to hard-deny rules above).
+ *  - ask: surface the normal permission prompt (the UI attaches an attention banner).
+ *  - think:
+ *      thinkMode 1 -> attach a reflection hint and still surface the prompt (never silent).
+ *      thinkMode 2 -> reflect internally and resolve auto-allow (no prompt).
+ *  - thinkToThink: a *brief* triage ("is this even worth thinking about, or can I
+ *      just proceed?") — if minor, proceed silently; only if it gives pause, fall
+ *      back to a normal `think`. It is the lightest option, not a double-effort
+ *      Think. Available on every category.
+ *
+ * Returns a PermissionResult.
+ */
+export const AUTO_NEW_THINK_TO_THINK_PROMPT =
+  'Briefly check: is this even worth thinking about, or can you just proceed? If it is minor, continue silently; only if it gives you pause, fall back to your normal think behavior for this category. Do not double-think.'
+
+export function resolveAutoNewPermission(
+  input: z.infer<typeof BashTool.inputSchema>,
+  toolPermissionContext: ToolPermissionContext,
+): PermissionResult {
+  // Hard deny always wins, even in autoNew.
+  const hardDeny = checkEarlyExitDeny(input, toolPermissionContext)
+  if (hardDeny !== null) return hardDeny
+
+  const cwd = getCwd()
+  const config = getAutoNewModeConfig()
+  const category: AutoNewCategory = classifyAutoNewCategory(input.command, cwd, {
+    scriptCommands: config.scriptCommands,
+    executables: config.executables,
+  })
+  const policy = config[category]
+
+  // thinkToThink resolves to a (brief) think, then to the user's thinkMode choice.
+  const effectivePolicy: AutoNewModeCategoryPolicy =
+    policy === 'thinkToThink' ? 'think' : policy
+
+  if (effectivePolicy === 'allow') {
+    return {
+      behavior: 'allow',
+      decisionReason: {
+        type: 'mode',
+        mode: 'autoNew',
+      },
+    }
+  }
+
+  if (effectivePolicy === 'think') {
+    if (config.thinkMode === '1') {
+      // Reflect then still ask (never silent). Attach a reflection hint that
+      // the permission UI can render.
+      return {
+        behavior: 'ask',
+        message: createPermissionRequestMessage(BashTool.name),
+        decisionReason: {
+          type: 'mode',
+          mode: 'autoNew',
+        },
+        suggestions: undefined,
+        ...(feature('BASH_CLASSIFIER')
+          ? {
+              pendingClassifierCheck: buildPendingClassifierCheck(
+                input.command,
+                toolPermissionContext,
+              ),
+            }
+          : {}),
+      }
+    }
+    // thinkMode 2 (default): reflect internally and silently allow.
+    return {
+      behavior: 'allow',
+      decisionReason: {
+        type: 'mode',
+        mode: 'autoNew',
+      },
+    }
+  }
+
+  // effectivePolicy === 'ask'
+  return {
+    behavior: 'ask',
+    message: createPermissionRequestMessage(BashTool.name),
+    decisionReason: {
+      type: 'mode',
+      mode: 'autoNew',
+    },
+    suggestions: undefined,
+    ...(feature('BASH_CLASSIFIER')
+      ? {
+          pendingClassifierCheck: buildPendingClassifierCheck(
+            input.command,
+            toolPermissionContext,
+          ),
+        }
+      : {}),
+  }
 }
 
 /**
@@ -1875,14 +2035,61 @@ export async function bashToolHasPermission(
     return exactMatchResult
   }
 
+  // Workspace-tree gate (applies to ALL modes): operations that stay inside the
+  // workspace root + its descendants and do not classify into a sensitive
+  // category are auto-allowed without prompting. Sensitive categories
+  // (shiftDelete, recycleBin, systemWrite, onlineWrite) and any path that
+  // escapes the workspace still fall through to the normal per-mode policy.
+  const wsCwd = getCwd()
+  if (wsCwd && isCommandWithinWorkspace(input.command, wsCwd)) {
+    const wsCategory = classifyAutoNewCategory(input.command, wsCwd)
+    if (!SENSITIVE_AUTO_NEW_CATEGORIES.has(wsCategory)) {
+      const decisionReason: PermissionDecisionReason = {
+        type: 'workspace' as const,
+        reason: `Command operates within the workspace tree (${wsCwd}) and is not in a sensitive category; auto-allowed.`,
+      }
+      return {
+        behavior: 'allow',
+        decisionReason,
+        message: createPermissionRequestMessage(BashTool.name, decisionReason),
+        suggestions: [],
+      }
+    }
+  }
+
+  // TEMP DEBUG (NEOCODE_AUTO_DEBUG): capture decision-time mode + full context
+  // after a model switch OR intermittently, to confirm whether
+  // toolPermissionContext.mode reaches here as 'autoNew' or has reverted to the
+  // user's default (acceptEdits/legacy). Fires for EVERY bash decision.
+  if (isEnvTruthy(process.env.NEOCODE_AUTO_DEBUG)) {
+    process.stderr.write(
+      `[NEOCODE_AUTO_DEBUG] bash.decide mode=${JSON.stringify(
+        appState?.toolPermissionContext?.mode,
+      )} ctx=${JSON.stringify(
+        appState?.toolPermissionContext ?? null,
+      )} autoModeActive=${String(
+        autoModeStateModule?.isAutoModeActive?.() ?? 'n/a',
+      )} mainLoopModel=${JSON.stringify(getMainLoopModel?.() ?? 'n/a')} forSession=${JSON.stringify(
+        appState?.mainLoopModelForSession ?? 'n/a',
+      )}\n`,
+    )
+  }
+
+  // Auto (New) mode: per-category policy drives the decision. Handled entirely
+  // here (hard denials still win); the regular classifier is skipped below.
+  if (appState.toolPermissionContext.mode === 'autoNew') {
+    return resolveAutoNewPermission(input, appState.toolPermissionContext)
+  }
+
   // Check Bash prompt deny and ask rules in parallel (both use Haiku).
   // Deny takes precedence over ask, and both take precedence over allow rules.
   // Skip when in auto mode - auto mode classifier handles all permission decisions
   if (
     isClassifierPermissionsEnabled() &&
     !(
-      feature('TRANSCRIPT_CLASSIFIER') &&
-      appState.toolPermissionContext.mode === 'auto'
+      (feature('TRANSCRIPT_CLASSIFIER') &&
+        appState.toolPermissionContext.mode === 'auto') ||
+      appState.toolPermissionContext.mode === 'autoNew'
     )
   ) {
     const denyDescriptions = getBashPromptDenyDescriptions(
@@ -2391,9 +2598,20 @@ export async function bashToolHasPermission(
     subcommandPermissionDecisions.every(_ => _.behavior === 'allow') &&
     !hasPossibleCommandInjection
   ) {
+    // Collect suggestions from each subcommand decision so a "remember this
+    // command" rule survives the merge. Bug #2: previously this merge returned
+    // a fresh object with no `suggestions`, discarding the per-subcommand
+    // suggestion (e.g. a read-only command's prefix rule), so similar commands
+    // re-prompted after the user clicked "allow for this".
+    const mergedSuggestions = subcommandPermissionDecisions.flatMap(
+      _ => _.suggestions ?? [],
+    )
     return {
       behavior: 'allow',
       updatedInput: input,
+      ...(mergedSuggestions.length > 0
+        ? { suggestions: mergedSuggestions }
+        : {}),
       decisionReason: {
         type: 'subcommandResults',
         reasons: new Map(

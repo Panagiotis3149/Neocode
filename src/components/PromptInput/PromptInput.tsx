@@ -422,6 +422,9 @@ function PromptInput({
   const [showThinkingToggle, setShowThinkingToggle] = useState(false);
   const [showAutoModeOptIn, setShowAutoModeOptIn] = useState(false);
   const [previousModeBeforeAuto, setPreviousModeBeforeAuto] = useState<PermissionMode | null>(null);
+  // Permission-mode picker menu (replaces shift+tab cycling). The footer open/
+  // close is owned here so the keybinding and the badge share one source.
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const autoModeOptInTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const {
     dangerousModeDialog,
@@ -1629,6 +1632,101 @@ function PromptInput({
     applyModeChange(nextMode, preparedContext);
   }, [addNotification, helpOpen, requestPermissionModeChange, setAppState, setHelpOpen, setToolPermissionContext, showAutoModeOptIn, teamContext, toolPermissionContext, viewedTeammate, viewingAgentTaskId]);
 
+  // Opens the permission-mode picker menu (replaces shift+tab cycling).
+  const handleOpenModeMenu = useCallback(() => {
+    setModeMenuOpen(true);
+    if (helpOpen) {
+      setHelpOpen(false);
+    }
+  }, [helpOpen, setHelpOpen]);
+
+  // Handler for the permission-mode picker menu: applies a mode the user
+  // selected directly (replaces shift+tab cycling). Dangerous modes
+  // (bypassPermissions / fullAccess) still route through the confirmation flow.
+  const handleSelectMode = useCallback((nextMode: PermissionMode) => {
+    setModeMenuOpen(false);
+
+    const applyModeChange = (mode: PermissionMode, preparedContext: ToolPermissionContext) => {
+      logEvent('tengu_mode_cycle', {
+        to: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
+      });
+
+      if (mode === 'plan') {
+        saveGlobalConfig(current => ({
+          ...current,
+          lastPlanModeUse: Date.now()
+        }));
+      }
+
+      setAppState(prev => ({
+        ...prev,
+        toolPermissionContext: {
+          ...preparedContext,
+          mode
+        }
+      }));
+      setToolPermissionContext({
+        ...preparedContext,
+        mode
+      });
+      syncTeammateMode(mode, teamContext?.teamName);
+
+      if (helpOpen) {
+        setHelpOpen(false);
+      }
+    };
+
+    // First-time auto-mode opt-in (Legacy 'auto' only) shows the safety dialog.
+    if (feature('TRANSCRIPT_CLASSIFIER') && nextMode === 'auto' && toolPermissionContext.mode !== 'auto' && !hasAutoModeOptIn() && !viewingAgentTaskId) {
+      setPreviousModeBeforeAuto(toolPermissionContext.mode);
+      setAppState(prev => ({
+        ...prev,
+        toolPermissionContext: {
+          ...prev.toolPermissionContext,
+          mode: 'auto'
+        }
+      }));
+      setToolPermissionContext({
+        ...toolPermissionContext,
+        mode: 'auto'
+      });
+      if (autoModeOptInTimeoutRef.current) {
+        clearTimeout(autoModeOptInTimeoutRef.current);
+      }
+      autoModeOptInTimeoutRef.current = setTimeout((setShow, ref) => {
+        setShow(true);
+        ref.current = null;
+      }, 400, setShowAutoModeOptIn, autoModeOptInTimeoutRef);
+      if (helpOpen) {
+        setHelpOpen(false);
+      }
+      return;
+    }
+
+    if (nextMode === 'bypassPermissions' || nextMode === 'fullAccess') {
+      void requestPermissionModeChange({
+        mode: nextMode,
+        toolPermissionContext,
+        onApply: () => {
+          const preparedContext = transitionPermissionMode(toolPermissionContext.mode, nextMode, toolPermissionContext);
+          applyModeChange(nextMode, preparedContext);
+        },
+        onBlocked: error => {
+          addNotification({
+            key: `permission-mode-select-${nextMode}`,
+            text: error,
+            color: 'warning',
+            priority: 'high'
+          });
+        }
+      });
+      return;
+    }
+
+    const preparedContext = transitionPermissionMode(toolPermissionContext.mode, nextMode, toolPermissionContext);
+    applyModeChange(nextMode, preparedContext);
+  }, [addNotification, helpOpen, requestPermissionModeChange, setAppState, setHelpOpen, setToolPermissionContext, teamContext, toolPermissionContext, viewingAgentTaskId]);
+
   // Handler for auto mode opt-in dialog acceptance
   const handleAutoModeOptInAccept = useCallback(() => {
     if (feature('TRANSCRIPT_CLASSIFIER')) {
@@ -1738,9 +1836,9 @@ function PromptInput({
     'chat:stash': handleStash,
     'chat:modelPicker': handleModelPicker,
     'chat:thinkingToggle': handleThinkingToggle,
-    'chat:cycleMode': handleCycleMode,
+    'chat:cycleMode': handleOpenModeMenu,
     'chat:imagePaste': handleImagePaste
-  }), [handleUndo, handleNewline, handleExternalEditor, handleStash, handleModelPicker, handleThinkingToggle, handleCycleMode, handleImagePaste]);
+  }), [handleUndo, handleNewline, handleExternalEditor, handleStash, handleModelPicker, handleThinkingToggle, handleOpenModeMenu, handleImagePaste]);
   useKeybindings(chatHandlers, {
     context: 'Chat',
     isActive: !isModalOverlayActive && !isConfirmingDangerousMode
@@ -2344,7 +2442,7 @@ function PromptInput({
             {textInputElement}
           </Box>
         </Box>}
-      <PromptInputFooter apiKeyStatus={apiKeyStatus} debug={debug} exitMessage={exitMessage} vimMode={isVimModeEnabled() ? vimMode : undefined} mode={mode} autoUpdaterResult={autoUpdaterResult} isAutoUpdating={isAutoUpdating} verbose={verbose} onAutoUpdaterResult={onAutoUpdaterResult} onChangeIsUpdating={setIsAutoUpdating} suggestions={suggestions} selectedSuggestion={selectedSuggestion} maxColumnWidth={maxColumnWidth} toolPermissionContext={effectiveToolPermissionContext} helpOpen={helpOpen} suppressHint={input.length > 0} isLoading={isLoading} tasksSelected={tasksSelected} teamsSelected={teamsSelected} bridgeSelected={bridgeSelected} tmuxSelected={tmuxSelected} teammateFooterIndex={teammateFooterIndex} ideSelection={ideSelection} mcpClients={mcpClients} isPasting={isPasting} isInputWrapped={isInputWrapped} messages={messages} isSearching={isSearchingHistory} historyQuery={historyQuery} setHistoryQuery={setHistoryQuery} historyFailedMatch={historyFailedMatch} onOpenTasksDialog={isFullscreenEnvEnabled() ? handleOpenTasksDialog : undefined} />
+      <PromptInputFooter apiKeyStatus={apiKeyStatus} debug={debug} exitMessage={exitMessage} vimMode={isVimModeEnabled() ? vimMode : undefined} mode={mode} autoUpdaterResult={autoUpdaterResult} isAutoUpdating={isAutoUpdating} verbose={verbose} onAutoUpdaterResult={onAutoUpdaterResult} onChangeIsUpdating={setIsAutoUpdating} suggestions={suggestions} selectedSuggestion={selectedSuggestion} maxColumnWidth={maxColumnWidth} toolPermissionContext={effectiveToolPermissionContext} helpOpen={helpOpen} suppressHint={input.length > 0} isLoading={isLoading} tasksSelected={tasksSelected} teamsSelected={teamsSelected} bridgeSelected={bridgeSelected} tmuxSelected={tmuxSelected} teammateFooterIndex={teammateFooterIndex} ideSelection={ideSelection} mcpClients={mcpClients} isPasting={isPasting} isInputWrapped={isInputWrapped} messages={messages} isSearching={isSearchingHistory} historyQuery={historyQuery} setHistoryQuery={setHistoryQuery} historyFailedMatch={historyFailedMatch} onOpenTasksDialog={isFullscreenEnvEnabled() ? handleOpenTasksDialog : undefined} onOpenModeMenu={handleOpenModeMenu} onSelectMode={handleSelectMode} modeMenuOpen={modeMenuOpen} setModeMenuOpen={setModeMenuOpen} />
       {isFullscreenEnvEnabled() ? null : autoModeOptInDialog}
       {isFullscreenEnvEnabled() ?
     // position=absolute takes zero layout height so the spinner

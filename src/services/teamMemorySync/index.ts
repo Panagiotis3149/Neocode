@@ -26,6 +26,7 @@
 
 import axios from 'axios'
 import { createHash } from 'crypto'
+import type { Dirent } from 'fs'
 import { mkdir, readdir, readFile, stat, writeFile } from 'fs/promises'
 import { join, relative, sep } from 'path'
 import {
@@ -40,6 +41,7 @@ import {
   validateTeamMemKey,
 } from '../../memdir/teamMemPaths.js'
 import { count } from '../../utils/array.js'
+import { mapWithConcurrency } from '../../utils/boundedAsync.js'
 import {
   checkAndRefreshOAuthTokenIfNeeded,
   getClaudeAIOAuthTokens,
@@ -89,6 +91,9 @@ const MAX_FILE_SIZE_BYTES = 250_000
 const MAX_PUT_BODY_BYTES = 200_000
 const MAX_RETRIES = 3
 const MAX_CONFLICT_RETRIES = 2
+// Bounds concurrent local filesystem reads/writes so a repo with many team
+// memory files doesn't open hundreds of file handles at once.
+const TEAM_MEMORY_FILE_IO_CONCURRENCY = 8
 
 // ─── Sync state ─────────────────────────────────────────────
 
@@ -571,12 +576,14 @@ async function readLocalTeamMemory(maxEntries: number | null): Promise<{
   const teamDir = getTeamMemPath()
   const entries: Record<string, string> = {}
   const skippedSecrets: SkippedSecretFile[] = []
+  const fileSemaphore = new Semaphore(TEAM_MEMORY_FILE_IO_CONCURRENCY)
 
   async function walkDir(dir: string): Promise<void> {
     try {
-      const dirEntries = await readdir(dir, { withFileTypes: true })
-      await Promise.all(
-        dirEntries.map(async entry => {
+      const allDirEntries: Dirent[] = await readdir(dir, {
+        withFileTypes: true,
+      })
+      await mapWithConcurrency(allDirEntries, TEAM_MEMORY_FILE_IO_CONCURRENCY, async entry => {
           const fullPath = join(dir, entry.name)
           if (entry.isDirectory()) {
             await walkDir(fullPath)
@@ -619,8 +626,8 @@ async function readLocalTeamMemory(maxEntries: number | null): Promise<{
               // Skip unreadable files
             }
           }
-        }),
-      )
+        },
+    )
     } catch (e) {
       if (isErrnoException(e)) {
         if (e.code !== 'ENOENT' && e.code !== 'EACCES' && e.code !== 'EPERM') {
@@ -689,8 +696,11 @@ async function readLocalTeamMemory(maxEntries: number | null): Promise<{
 async function writeRemoteEntriesToLocal(
   entries: Record<string, string>,
 ): Promise<number> {
-  const results = await Promise.all(
-    Object.entries(entries).map(async ([relPath, content]) => {
+  const writeSemaphore = new Semaphore(TEAM_MEMORY_FILE_IO_CONCURRENCY)
+  const results = await mapWithConcurrency(
+    Object.entries(entries),
+    TEAM_MEMORY_FILE_IO_CONCURRENCY,
+    async ([relPath, content]) => {
       let validatedPath: string
       try {
         validatedPath = await validateTeamMemKey(relPath)
@@ -748,7 +758,7 @@ async function writeRemoteEntriesToLocal(
         )
         return false
       }
-    }),
+    },
   )
 
   return count(results, Boolean)

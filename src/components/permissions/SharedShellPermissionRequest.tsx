@@ -32,6 +32,7 @@ type SharedShellPermissionRequestProps<T extends string> = Pick<
   description?: string
   explainerState: ExplainerState
   destructiveWarning?: string | null
+  note?: React.ReactNode
   question?: string
   options: OptionWithDescription<T>[]
   onSelect: (value: T) => void
@@ -56,6 +57,7 @@ export function SharedShellPermissionRequest<T extends string>({
   description,
   explainerState,
   destructiveWarning,
+  note,
   question = 'Do you want to proceed?',
   options,
   onSelect,
@@ -124,6 +126,13 @@ export function SharedShellPermissionRequest<T extends string>({
               <Box marginBottom={1}>
                 <Text color="warning" dimColor={isContentDimmed}>
                   {destructiveWarning}
+                </Text>
+              </Box>
+            ) : null}
+            {note ? (
+              <Box marginBottom={1}>
+                <Text color="warning" bold>
+                  {note}
                 </Text>
               </Box>
             ) : null}

@@ -14,6 +14,7 @@ export type ManageablePermissionMode = Extract<
   | 'acceptEdits'
   | 'plan'
   | 'auto'
+  | 'autoNew'
   | 'bypassPermissions'
   | 'fullAccess'
 >
@@ -23,6 +24,8 @@ const MODE_DESCRIPTIONS: Record<ManageablePermissionMode, string> = {
   acceptEdits: 'Auto-accept file edit operations in the workspace.',
   plan: 'Analysis only; tool execution is blocked.',
   auto: 'Use classifier-driven approvals when available.',
+  autoNew:
+    'Autonomous mode with per-category Allow/Think/Ask policy and a safety classifier.',
   bypassPermissions:
     'Skip normal permission prompts while preserving hard safety prompts.',
   fullAccess:
@@ -41,6 +44,7 @@ export function getManageablePermissionModes(
     modes.push('auto')
   }
 
+  modes.push('autoNew')
   modes.push('bypassPermissions', 'fullAccess')
 
   return modes
@@ -57,7 +61,7 @@ export function getPermissionModeOptions(
     value: mode,
     description: MODE_DESCRIPTIONS[mode],
     color:
-      mode === 'bypassPermissions' || mode === 'fullAccess'
+      mode === 'bypassPermissions' || mode === 'fullAccess' || mode === 'autoNew'
         ? getModeColor(mode)
         : undefined,
   }))

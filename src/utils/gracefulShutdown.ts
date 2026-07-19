@@ -301,6 +301,16 @@ export const setupGracefulShutdown = memoize(() => {
     }
   }
 
+  let crashShutdownTriggered = false
+  const triggerCrashShutdown = (signal: string, error: unknown): void => {
+    if (crashShutdownTriggered) return
+    crashShutdownTriggered = true
+    // Force a graceful shutdown so the cleanup registry runs — this is what
+    // reaps orphaned children (tracked execFileNoThrow git instances, running
+    // LocalShellTasks, LSP servers) so a crash doesn't leave zombies behind.
+    void gracefulShutdown(1, signal as ExitReason)
+  }
+
   // Log uncaught exceptions for container observability and analytics
   // Error names (e.g., "TypeError") are not sensitive - safe to log
   process.on('uncaughtException', error => {
@@ -312,6 +322,7 @@ export const setupGracefulShutdown = memoize(() => {
       error_name:
         error.name as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     })
+    triggerCrashShutdown('uncaughtException', error)
   })
 
   // Log unhandled promise rejections for container observability and analytics
@@ -335,6 +346,7 @@ export const setupGracefulShutdown = memoize(() => {
       error_name:
         errorName as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     })
+    triggerCrashShutdown('unhandledRejection', reason)
   })
 })
 

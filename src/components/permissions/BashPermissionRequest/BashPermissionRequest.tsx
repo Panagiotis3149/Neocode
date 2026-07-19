@@ -15,13 +15,19 @@ import { BashTool } from '../../../tools/BashTool/BashTool.js'
 import {
   getFirstWordPrefix,
   getSimpleCommandPrefix,
+  AUTO_NEW_THINK_REFLECT_PROMPTS,
 } from '../../../tools/BashTool/bashPermissions.js'
 import { getDestructiveCommandWarning } from '../../../tools/BashTool/destructiveCommandWarning.js'
 import { parseSedEditCommand } from '../../../tools/BashTool/sedEditParser.js'
+import {
+  classifyAutoNewCategory,
+} from '../../../utils/permissions/autoNewCategories.js'
+import { getAutoNewModeConfig } from '../../../utils/settings/settings.js'
 import { BASH_TOOL_NAME } from '../../../tools/BashTool/toolName.js'
 import { shouldUseSandbox } from '../../../tools/BashTool/shouldUseSandbox.js'
 import { extractOutputRedirections } from '../../../utils/bash/commands.js'
 import { getCompoundCommandPrefixesStatic } from '../../../utils/bash/prefix.js'
+import { getCwd } from '../../../utils/cwd.js'
 import { extractRules } from '../../../utils/permissions/PermissionUpdate.js'
 import { SandboxManager } from '../../../utils/sandbox/sandbox-adapter.js'
 import { ShimmerChar } from '../../Spinner/ShimmerChar.js'
@@ -275,6 +281,22 @@ function BashPermissionRequestInner({
     ],
   )
 
+  const autoNewReflectNote = useMemo(() => {
+    if (toolUseConfirm.permissionResult.behavior !== 'ask') return null
+    if (toolPermissionContext.mode !== 'autoNew') return null
+    const config = getAutoNewModeConfig()
+    const policy = config[classifyAutoNewCategory(command, getCwd())]
+    if (policy !== 'think' && policy !== 'thinkToThink') return null
+    const mode1 = config.thinkMode === '1'
+    return (
+      <Text color="warning">
+        {mode1
+          ? 'Reflecting: is this command really needed, or is there a safer path?'
+          : 'Reflecting briefly: can I just proceed, or is this worth a normal think?'}
+      </Text>
+    )
+  }, [toolUseConfirm.permissionResult.behavior, toolPermissionContext.mode, command])
+
   const handleDismissCheckmark = useCallback(() => {
     toolUseConfirm.onDismissCheckmark?.()
   }, [toolUseConfirm])
@@ -368,6 +390,7 @@ function BashPermissionRequestInner({
       description={toolUseConfirm.description}
       explainerState={explainerState}
       destructiveWarning={destructiveWarning}
+      note={autoNewReflectNote}
       options={options}
       onSelect={onSelect}
       onCancel={() => handleReject()}

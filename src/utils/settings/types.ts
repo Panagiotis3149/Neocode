@@ -728,6 +728,51 @@ export const SettingsSchema = lazySchema(() =>
         .optional()
         .catch(undefined)
         .describe('Persisted effort level for supported models.'),
+      reasoningEffortOverrides: z
+        .array(
+          z.object({
+            match: z
+              .string()
+              .min(1)
+              .describe(
+                'Exact model id or a prefix ending with "*" (e.g. "novita/*").',
+              ),
+            param: z
+              .string()
+              .min(1)
+              .describe(
+                'Wire param name to send, e.g. "reasoning_effort" | "reasoning" | "thinking".',
+              ),
+            enabled: z.boolean().describe('Whether this override is active.'),
+          }),
+        )
+        .optional()
+        .catch([])
+        .describe(
+          'User-defined reasoning-effort overrides: enable /effort for a model (or model prefix) and choose the wire param name to send.',
+        ),
+      requestExtraOverrides: z
+        .array(
+          z.object({
+            match: z
+              .string()
+              .min(1)
+              .describe(
+                'Exact model id, a prefix ending with "*" (e.g. "tencent/*"), or "*" for global.',
+              ),
+            json: z
+              .record(z.string(), z.unknown())
+              .describe(
+                'Arbitrary nested JSON merged into the request body. Use "$reasoning_effort" to substitute the current effort level.',
+              ),
+            enabled: z.boolean().describe('Whether this override is active.'),
+          }),
+        )
+        .optional()
+        .catch([])
+        .describe(
+          'User-defined raw-JSON request-body overrides, applied by model/prefix/global scope and deep-merged into outgoing requests.',
+        ),
       advisorModel: z
         .string()
         .optional()
@@ -1065,6 +1110,101 @@ export const SettingsSchema = lazySchema(() =>
         .enum(['disable'])
         .optional()
         .describe('Disable auto mode'),
+      // Auto (New) mode: per-category Allow/Think/Ask policy. Not gated behind
+      // TRANSCRIPT_CLASSIFIER — the per-category policy is the primary gate and
+      // the legacy classifier is only reused as an optional safety assist.
+      autoNewMode: z
+        .object({
+          thinkMode: z
+            .enum(['1', '2'])
+            .default('2')
+            .describe(
+              'Think behavior: 1 = reflect "is this really needed?" then still ask; 2 = reflect "is this safe enough?" then silently allow (default)',
+            ),
+          thinkDepth: z
+            .number()
+            .int()
+            .min(1)
+            .max(5)
+            .default(2)
+            .describe(
+              'How much the model should weigh the danger of each action before proceeding (1 = act freely, 5 = treat every action as high-stakes). Implemented by scaling the autonomous system prompt, not by reasoning effort.',
+            ),
+          recycleBin: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('allow')
+            .describe(
+              'Soft delete / move-to-recycle (trash, rm without -rf, del without /f): model picks allow or think based on the file(s); user can pin a choice',
+            ),
+          shiftDelete: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('ask')
+            .describe(
+              'Permanent delete (rm -rf, git clean, git reset --hard, del /f): user choice, default ask',
+            ),
+          tempRead: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('allow')
+            .describe('Category: reading from temp/ directories'),
+          tempWrite: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('allow')
+            .describe('Category: writing to temp/ directories'),
+          onlineRead: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('allow')
+            .describe('Category: read-only network actions (curl GET, git fetch/clone, gh api GET)'),
+          onlineWrite: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('ask')
+            .describe(
+              'Category: network writes/uploads (git push, curl POST, gh api mutations, npm publish, scp)',
+            ),
+          systemRead: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('allow')
+            .describe('Category: listing/inspecting running processes (tasklist, ps, ls /proc)'),
+          systemWrite: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('ask')
+            .describe('Category: stopping/restarting a process or service (kill, taskkill, shutdown, systemctl)'),
+          safeDev: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('allow')
+            .describe(
+              'Safe developer tooling: build systems, test runners, archive/container inspection, decompilers/bytecode viewers, and read-only package/dependency info',
+            ),
+          runScript: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('allow')
+            .describe(
+              'Run a script launched via an interpreter (bash/sh/python/node/bun/deno/ruby/perl/pwsh/tsx ...); defaults to allow since interpreter-wrapped scripts match the safe-dev intent',
+            ),
+          runExecutable: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('ask')
+            .describe(
+              'Run a binary directly (a path or bare binary invoked without an interpreter); more risky than an interpreter-wrapped script, so defaults to ask',
+            ),
+          scriptCommands: z
+            .array(z.string())
+            .default([])
+            .describe(
+              'Script paths/names (matched as substring on the script arg) that are always treated as runScript regardless of the interpreter heuristic',
+            ),
+          executables: z
+            .array(z.string())
+            .default([])
+            .describe(
+              'Binary names/paths (matched as substring on the command) that are always treated as runExecutable regardless of the interpreter heuristic',
+            ),
+          other: z
+            .enum(['allow', 'think', 'ask', 'thinkToThink'])
+            .default('ask')
+            .describe('Catch-all category for commands not matched by a specific category'),
+        })
+        .optional()
+        .describe('Per-category policy for the Auto (New) permission mode'),
       // Auto-accept configuration for safe read-only tools and commands
       autoAccept: z
         .object({

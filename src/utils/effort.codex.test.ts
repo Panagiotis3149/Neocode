@@ -75,7 +75,11 @@ async function importFreshEffortModule(options: {
     ? {
         apiProvider: options.provider,
         supportsCodexReasoningEffort: options.supportsCodexReasoningEffort,
-        routeId: options.routeId,
+        // Tests that don't pin a route are asserting *native* provider behavior,
+        // so default to the OpenAI-native route rather than leaking the ambient
+        // OPENAI_BASE_URL (which in CI points at openrouter) into route-less
+        // calls. The openrouter shape is exercised explicitly below.
+        routeId: options.routeId ?? 'openai',
         catalogEntries: options.catalogEntries,
         modelDescriptors: options.modelDescriptors,
         openaiShimConfig: options.openaiShimConfig,
@@ -785,4 +789,49 @@ test('explicit compat metadata wire formats are controllable and feed the reques
   })
   expect(modelSupportsEffort('custom-deepseek-low-only')).toBe(false)
   expect(modelSupportsWireEffort('custom-deepseek-low-only')).toBe(false)
+})
+
+test('openrouter-served NovitaAI/Nvidia models support /effort (the previously "useless" case)', async () => {
+  const {
+    modelSupportsEffort,
+    modelSupportsWireEffort,
+    getAvailableEffortLevels,
+    resolveModelReasoningControl,
+  } = await importFreshEffortModule({
+    provider: 'openai',
+    supportsCodexReasoningEffort: false,
+    routeId: 'openrouter',
+  })
+
+  // These are the exact vendors the user asked about. They previously returned
+  // false for modelSupportsEffort (not in the legacy allowlist, no 3P override)
+  // which rendered /effort inert — the root cause of "effort is pr much useless".
+  // NovitaAI / Nvidia via OpenRouter now accept the top-level `reasoning_effort` param.
+  for (const model of [
+    'novita/llama-3.3-70b-instruct',
+    'nvidia/llama-3.1-nemotron-70b-instruct',
+  ]) {
+    expect(modelSupportsEffort(model)).toBe(true)
+    expect(modelSupportsWireEffort(model)).toBe(true)
+    expect(
+      resolveModelReasoningControl(model),
+    ).toMatchObject({
+      controllable: true,
+      wireFormat: 'reasoning_effort',
+      source: 'compat',
+    })
+    // The picker should surface standard levels so /effort is actually usable.
+    expect(getAvailableEffortLevels(model).length).toBeGreaterThan(0)
+  }
+
+  // A DeepSeek-served model reached via OpenRouter keeps its native
+  // deepseek-compatible wire format (not the generic reasoning_effort param).
+  expect(modelSupportsEffort('openrouter/deepseek/deepseek-chat')).toBe(true)
+  expect(
+    resolveModelReasoningControl('openrouter/deepseek/deepseek-chat'),
+  ).toMatchObject({
+    controllable: true,
+    wireFormat: 'deepseek_compatible',
+    source: 'compat',
+  })
 })
