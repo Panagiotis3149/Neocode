@@ -728,6 +728,23 @@ export const SettingsSchema = lazySchema(() =>
         .optional()
         .catch(undefined)
         .describe('Persisted effort level for supported models.'),
+      contextWindowOverrides: z
+        .record(
+          z.string(),
+          z.object({
+            contextWindowTokens: z
+              .number()
+              .int()
+              .min(16_384)
+              .max(2_147_483_647)
+              .describe('Overridden context window size in tokens.'),
+          }),
+        )
+        .optional()
+        .catch({})
+        .describe(
+          'Per-model context window overrides set via /context <size>.',
+        ),
       reasoningEffortOverrides: z
         .array(
           z.object({

@@ -8,6 +8,7 @@ import {
   resolveActiveRouteIdFromEnv,
 } from '../integrations/routeMetadata.js'
 import { getCanonicalName } from './model/model.js'
+import { getContextWindowOverride } from './contextWindowOverrides.js'
 import { getModelCapability } from './model/modelCapabilities.js'
 
 // Model context window size (200k tokens for all models right now)
@@ -93,6 +94,12 @@ export function getContextWindowForModel(
     if (!isNaN(override) && override > 0) {
       return override
     }
+  }
+
+  // Highest-priority layer: user-set per-model context override from settings.
+  const override = getContextWindowOverride(model)
+  if (override) {
+    return override.contextWindowTokens
   }
 
   // [1m] suffix — explicit client-side opt-in, respected over all detection
@@ -274,4 +281,77 @@ export function getModelMaxOutputTokens(model: string): {
  */
 export function getMaxThinkingTokensForModel(model: string): number {
   return getModelMaxOutputTokens(model).upperLimit - 1
+}
+
+/**
+ * Describe which layer provides the context window for a model.
+ * Returns a source label and whether an override is active.
+ */
+export function getContextWindowSource(
+  model: string,
+  betas?: string[],
+): {
+  source: string
+  isOverride: boolean
+} {
+  // Check ant cap first (internal)
+  if (
+    process.env.USER_TYPE === 'ant' &&
+    process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
+  ) {
+    const override = parseInt(process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, 10)
+    if (!isNaN(override) && override > 0) {
+      return { source: 'CLAUDE_CODE_MAX_CONTEXT_TOKENS env', isOverride: true }
+    }
+  }
+
+  // Highest-priority: user-set per-model override from settings
+  const override = getContextWindowOverride(model)
+  if (override) {
+    return { source: 'settings override', isOverride: true }
+  }
+
+  // [1m] suffix
+  if (has1mContext(model)) {
+    return { source: '[1m] suffix', isOverride: false }
+  }
+
+  // OpenAI-compatible / integration runtime limits
+  if (shouldUseIntegrationRuntimeLimits()) {
+    const runtimeLimits = resolveModelRuntimeLimits({ model })
+    if (runtimeLimits.contextWindow !== undefined) {
+      return { source: 'integration metadata', isOverride: false }
+    }
+    return { source: '128k fallback (unknown model)', isOverride: false }
+  }
+
+  // Model capability
+  const cap = getModelCapability(model)
+  if (cap?.max_input_tokens && cap.max_input_tokens >= 100_000) {
+    if (
+      cap.max_input_tokens > MODEL_CONTEXT_WINDOW_DEFAULT &&
+      is1mContextDisabled()
+    ) {
+      return { source: 'model capability (1M disabled)', isOverride: false }
+    }
+    return { source: 'model capability', isOverride: false }
+  }
+
+  // 1M beta
+  if (betas?.includes(CONTEXT_1M_BETA_HEADER) && modelSupports1M(model)) {
+    return { source: '1M beta', isOverride: false }
+  }
+  if (getSonnet1mExpTreatmentEnabled(model)) {
+    return { source: 'coral_reef_sonnet experiment', isOverride: false }
+  }
+
+  // ANT model metadata
+  if (process.env.USER_TYPE === 'ant') {
+    const antModel = resolveAntModel(model)
+    if (antModel?.contextWindow) {
+      return { source: 'ANT model metadata', isOverride: false }
+    }
+  }
+
+  return { source: 'default 200k', isOverride: false }
 }
