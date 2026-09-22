@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.0 (2026-09-22)
+
+
+### Features
+
+* **/context:** slash command for per-model context window overrides ([6cf7c58](https://github.com/Panagiotis3149/Neocode/commit/6cf7c588c46bc72a3f5ee3f7bfb7cc8ade55a5cb))
+* add /skid (skidding) bundled skill ([d2f882b](https://github.com/Panagiotis3149/Neocode/commit/d2f882b39b39fa8affeb607bb2a1427bf4cf5f90))
+* commit remaining unpushed work (autoNew, effort, orphan reaper, skid tooling) ([168fb91](https://github.com/Panagiotis3149/Neocode/commit/168fb91bf7596dcb9122e75d97ff89a3d5c1e743))
+* release 0.19.0 ([5cbf594](https://github.com/Panagiotis3149/Neocode/commit/5cbf5948a7ba3102b433f6bf930357509af35c46))
+* wire /skid (skidding) skill into bundled registration ([c81ca8e](https://github.com/Panagiotis3149/Neocode/commit/c81ca8e2cab738ccea5842a9036704ca1e76de69))
+
+
+### Performance Improvements
+
+* skid 5 upstream performance-fix PRs (1478, 1743, 1744, 1869, 1948) ([38fc724](https://github.com/Panagiotis3149/Neocode/commit/38fc7248b22ab689837b6ccaecdcda28ed0da4cb))
+
 ## 0.19.0 - 2026-09-22
 
 ### Added
