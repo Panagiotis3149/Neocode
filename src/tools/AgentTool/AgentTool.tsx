@@ -27,6 +27,7 @@ import { lazySchema } from '../../utils/lazySchema.js';
 import { createUserMessage, extractTextContent, isSyntheticMessage, normalizeMessages } from '../../utils/messages.js';
 import { getAgentModel } from '../../utils/model/agent.js';
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js';
+import type { Benchmarks } from '../../utils/model/benchmarkRegistry.js';
 import { permissionModeSchema } from '../../utils/permissions/PermissionMode.js';
 import type { PermissionResult } from '../../utils/permissions/PermissionResult.js';
 import { filterDeniedAgents, getDenyRuleForAgent } from '../../utils/permissions/permissions.js';
@@ -56,6 +57,9 @@ import type { AgentDefinition } from './loadAgentsDir.js';
 import { filterAgentsByMcpRequirements, hasRequiredMcpServers, isBuiltInAgent } from './loadAgentsDir.js';
 import { getPrompt } from './prompt.js';
 import { runAgent } from './runAgent.js';
+import type { SpawnMode, Verbosity } from './subagentEventBus.js';
+import type { SubagentModelOverrides } from './subagentInstance.js';
+import { createSubagentSupervisor } from './subagentSupervisor.js';
 import { renderGroupedAgentToolUse, renderToolResultMessage, renderToolUseErrorMessage, renderToolUseMessage, renderToolUseProgressMessage, renderToolUseRejectedMessage, renderToolUseTag, userFacingName, userFacingNameBackgroundColor } from './UI.js';
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -87,6 +91,16 @@ const baseInputSchema = lazySchema(() => z.object({
   prompt: z.string().describe('The task for the agent to perform'),
   subagent_type: z.string().optional().describe('The type of specialized agent to use for this task'),
   model: z.string().trim().min(1, 'Model cannot be empty').optional().describe("Optional model override for this agent. Accepts aliases such as sonnet, opus, haiku, inherit, or a provider-supported model ID. Takes precedence over the agent definition's model frontmatter. If omitted, uses the agent definition's model, or inherits from the parent."),
+  provider: z.string().trim().min(1, 'Provider cannot be empty').optional().describe("Optional provider profile id or display name (per the /model profile picker) that routes this agent's model. When it resolves, the profile's endpoint and credentials replace settings-based agent routing entirely; an unresolvable name warns and falls back to settings routing."),
+  subagent_name: z.string().trim().min(1, 'Subagent name cannot be empty').optional().describe('Display name and address for a Subagents V2 worker'),
+  model_overrides: z.object({
+    model: z.string().trim().min(1, 'Model cannot be empty').optional(),
+    provider: z.string().trim().min(1, 'Provider cannot be empty').optional(),
+    temperature: z.number().finite().optional(),
+    reasoning_effort: z.enum(['low', 'medium', 'high']).optional()
+  }).optional().describe('Optional Subagents V2 model and provider overrides'),
+  verbosity: z.enum(['outputs_and_calls', 'calls_only', 'none']).optional().describe('Subagents V2 event verbosity'),
+  lookup_benchmarks: z.boolean().optional().describe('Look up model benchmarks before spawning the subagent'),
   run_in_background: z.boolean().optional().describe('Set to true to run this agent in the background. You will be notified when it completes.')
 }));
 
@@ -96,7 +110,7 @@ const fullInputSchema = lazySchema(() => {
   const multiAgentInputSchema = z.object({
     name: z.string().optional().describe('Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running.'),
     team_name: z.string().optional().describe('Team name for spawning. Uses current team context if omitted.'),
-    mode: permissionModeSchema().optional().describe('Permission mode for spawned teammate (e.g., "plan" to require plan approval).')
+    mode: z.union([permissionModeSchema(), z.enum(['async', 'sync'])]).optional().describe('Permission mode for spawned teammate or Subagents V2 execution mode.')
   });
   return baseInputSchema().merge(multiAgentInputSchema).extend({
     isolation: ("external" === 'ant' ? z.enum(['worktree', 'remote']) : z.enum(['worktree'])).optional().describe("external" === 'ant' ? 'Isolation mode. "worktree" creates a temporary git worktree so the agent works on an isolated copy of the repo. "remote" launches the agent in a remote CCR environment (always runs in background).' : 'Isolation mode. "worktree" creates a temporary git worktree so the agent works on an isolated copy of the repo.'),
@@ -135,16 +149,35 @@ type InputSchema = ReturnType<typeof inputSchema>;
 type AgentToolInput = z.infer<ReturnType<typeof baseInputSchema>> & {
   name?: string;
   team_name?: string;
-  mode?: z.infer<ReturnType<typeof permissionModeSchema>>;
+  mode?: z.infer<ReturnType<typeof permissionModeSchema>> | SpawnMode;
   isolation?: 'worktree' | 'remote';
+  provider?: string;
   cwd?: string;
+  subagent_name?: string;
+  model_overrides?: SubagentModelOverrides;
+  verbosity?: Verbosity;
+  lookup_benchmarks?: boolean;
 };
+
+const benchmarkOutputSchema = z.object({
+  modelId: z.string(),
+  parameterCount: z.number().optional(),
+  downloads: z.number().optional(),
+  tags: z.array(z.string()).optional(),
+  contextWindow: z.number().optional(),
+  pricing: z.object({
+    input: z.number().optional(),
+    output: z.number().optional()
+  }).optional(),
+  scores: z.record(z.string(), z.number()).optional()
+}).describe('Optional model benchmark metadata');
 
 // Output schema - multi-agent spawned schema added dynamically at runtime when enabled
 export const outputSchema = lazySchema(() => {
   const syncOutputSchema = agentToolResultSchema().extend({
     status: z.literal('completed'),
-    prompt: z.string()
+    prompt: z.string(),
+    benchmarks: benchmarkOutputSchema.optional()
   });
   const asyncOutputSchema = z.object({
     status: z.literal('async_launched'),
@@ -152,7 +185,8 @@ export const outputSchema = lazySchema(() => {
     description: z.string().describe('The description of the task'),
     prompt: z.string().describe('The prompt for the agent'),
     outputFile: z.string().describe('Path to the output file for checking agent progress'),
-    canReadOutputFile: z.boolean().optional().describe('Whether the calling agent has Read/Bash tools to check progress')
+    canReadOutputFile: z.boolean().optional().describe('Whether the calling agent has Read/Bash tools to check progress'),
+    benchmarks: benchmarkOutputSchema.optional()
   });
   return z.union([syncOutputSchema, asyncOutputSchema]);
 });
@@ -249,10 +283,20 @@ export const AgentTool = buildTool({
     team_name,
     mode: spawnMode,
     isolation,
-    cwd
+    provider,
+    cwd,
+    subagent_name,
+    model_overrides,
+    verbosity,
+    lookup_benchmarks
   }: AgentToolInput, toolUseContext, canUseTool, assistantMessage, onProgress?) {
     const startTime = Date.now();
     const model = isCoordinatorMode() ? undefined : modelParam;
+    const subagentV2Requested = subagent_name !== undefined || model_overrides !== undefined || verbosity !== undefined || lookup_benchmarks !== undefined || spawnMode === 'async' || spawnMode === 'sync';
+
+    if (subagentV2Requested && spawnMode !== undefined && spawnMode !== 'async' && spawnMode !== 'sync') {
+      throw new Error('Subagents V2 mode must be "async" or "sync".');
+    }
 
     // Get app state for permission mode and agent filtering
     const appState = toolUseContext.getAppState();
@@ -343,7 +387,7 @@ export const AgentTool = buildTool({
     // - subagent_type set: use it (explicit wins)
     // - subagent_type omitted, gate on: fork path (undefined)
     // - subagent_type omitted, gate off: default general-purpose
-    const effectiveType = subagent_type ?? (isForkSubagentEnabled() ? undefined : GENERAL_PURPOSE_AGENT.agentType);
+    const effectiveType = subagent_type ?? (subagentV2Requested || !isForkSubagentEnabled() ? GENERAL_PURPOSE_AGENT.agentType : undefined);
     const isForkPath = effectiveType === undefined;
     let selectedAgent: AgentDefinition;
     if (isForkPath) {
@@ -440,11 +484,11 @@ export const AgentTool = buildTool({
 
     // Resolve agent params for logging and prebuilt system prompts. runAgent
     // resolves the same settings again before the actual query.
-    const resolvedAgentModel = getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, isForkPath ? undefined : model, permissionMode);
+    const resolvedAgentModel = getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, isForkPath ? undefined : model_overrides?.model ?? model, permissionMode);
     const { mainLoopModel: effectiveAgentModel } = resolveAgentRunModelRouting({
       resolvedAgentModel,
-      toolSpecifiedModel: isForkPath ? undefined : model,
-      agentName: name,
+      toolSpecifiedModel: isForkPath ? undefined : model_overrides?.model ?? model,
+      agentName: subagent_name ?? name,
       subagentType: selectedAgent.agentType,
       agentDefinitionModel: selectedAgent.model,
       settings: getInitialSettings(),
@@ -608,6 +652,12 @@ export const AgentTool = buildTool({
       mode: selectedAgent.permissionMode ?? 'acceptEdits'
     };
     const workerTools = assembleToolPool(workerPermissionContext, appState.mcp.tools);
+    const v2WorkerTools = subagentV2Requested
+      ? [
+          ...workerTools,
+          (await import('../SendMessageTool/SendMessageTool.js')).SendMessageTool
+        ].filter((tool, index, tools) => tools.findIndex(candidate => candidate.name === tool.name) === index)
+      : workerTools;
 
     // Create a stable agent ID early so it can be used for worktree slug
     const earlyAgentId = createAgentId();
@@ -620,7 +670,7 @@ export const AgentTool = buildTool({
       gitRoot?: string;
       hookBased?: boolean;
     } | null = null;
-    if (effectiveIsolation === 'worktree') {
+    if (!subagentV2Requested && effectiveIsolation === 'worktree') {
       const slug = `agent-${earlyAgentId.slice(0, 8)}`;
       try {
         worktreeInfo = await createAgentWorktree(slug);
@@ -653,6 +703,7 @@ export const AgentTool = buildTool({
       isAsync: shouldRunAsync,
       querySource: toolUseContext.options.querySource ?? getQuerySourceForAgent(selectedAgent.agentType, isBuiltInAgent(selectedAgent)),
       model: isForkPath ? undefined : model,
+      provider: isForkPath ? undefined : provider,
       // Fork path: pass parent's system prompt AND parent's exact tool
       // array (cache-identical prefix). workerTools is rebuilt under
       // permissionMode 'bubble' which differs from the parent's mode, so
@@ -666,10 +717,10 @@ export const AgentTool = buildTool({
       // returns the override path.
       override: isForkPath ? {
         systemPrompt: forkParentSystemPrompt
-      } : enhancedSystemPrompt && !worktreeInfo && !cwd ? {
+      } : !subagentV2Requested && enhancedSystemPrompt && !worktreeInfo && !cwd ? {
         systemPrompt: asSystemPrompt(enhancedSystemPrompt)
       } : undefined,
-      availableTools: isForkPath ? toolUseContext.options.tools : workerTools,
+      availableTools: isForkPath ? toolUseContext.options.tools : v2WorkerTools,
       // Pass parent conversation when the fork-subagent path needs full
       // context. useExactTools inherits thinkingConfig (runAgent.ts:624).
       forkContextMessages: isForkPath ? toolUseContext.messages : undefined,
@@ -678,7 +729,7 @@ export const AgentTool = buildTool({
       }),
       worktreePath: worktreeInfo?.worktreePath,
       description,
-      agentName: name,
+      agentName: subagent_name ?? name,
     };
 
     // Helper to wrap execution with a cwd override: explicit cwd arg (KAIROS)
@@ -729,6 +780,56 @@ export const AgentTool = buildTool({
         worktreeBranch
       };
     };
+    if (subagentV2Requested) {
+      const mode: SpawnMode = spawnMode === 'sync' ? 'sync' : 'async';
+      const supervisor = toolUseContext.subagentSupervisor ?? createSubagentSupervisor();
+      const handle = await supervisor.spawn({
+        agentDefinition: selectedAgent,
+        prompt,
+        toolUseContext,
+        availableTools: runAgentParams.availableTools,
+        querySource: runAgentParams.querySource,
+        runAgentParams,
+        agentName: subagent_name,
+        modelOverrides: model_overrides,
+        provider,
+        verbosity,
+        mode,
+        lookup_benchmarks
+      });
+
+      if (mode === 'sync') {
+        await handle.done;
+        const agentMessages = await handle.result as MessageType[];
+        const agentResult = finalizeAgentTool(agentMessages, asAgentId(handle.agentId), {
+          ...metadata,
+          isAsync: false
+        });
+        return {
+          data: {
+            status: 'completed' as const,
+            prompt,
+            ...(handle.benchmarks ? { benchmarks: handle.benchmarks as Benchmarks } : {}),
+            ...agentResult
+          }
+        };
+      }
+
+      const canReadOutputFile = toolUseContext.options.tools.some(t => toolMatchesName(t, FILE_READ_TOOL_NAME) || toolMatchesName(t, BASH_TOOL_NAME));
+      return {
+        data: {
+          isAsync: true as const,
+          status: 'async_launched' as const,
+          agentId: handle.agentId,
+          description,
+          prompt,
+          outputFile: getTaskOutputPath(handle.agentId),
+          canReadOutputFile,
+          ...(handle.benchmarks ? { benchmarks: handle.benchmarks as Benchmarks } : {})
+        }
+      };
+    }
+
     if (shouldRunAsync) {
       const asyncAgentId = earlyAgentId;
       const agentBackgroundTask = registerAsyncAgent({

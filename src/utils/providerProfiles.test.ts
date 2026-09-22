@@ -2274,3 +2274,65 @@ test('DEFAULT_MISTRAL_MODEL matches the mistral gateway defaultModel', async () 
   expect(mistralGateway.defaultModel).toBeDefined()
   expect(DEFAULT_MISTRAL_MODEL).toBe(mistralGateway.defaultModel!)
 })
+
+describe('findProviderProfileByIdOrName', () => {
+  test('resolves by id', async () => {
+    const { findProviderProfileByIdOrName } =
+      await importFreshProviderProfileModules()
+
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [
+        buildProfile({ id: 'prof_alpha', name: 'Alpha Route', model: 'alpha-model' }),
+        buildProfile({ id: 'prof_beta', name: 'Beta Route', model: 'beta-model' }),
+      ],
+    }))
+
+    expect(findProviderProfileByIdOrName('prof_beta')?.id).toBe('prof_beta')
+  })
+
+  test('resolves by display name, case-insensitive and trimmed', async () => {
+    const { findProviderProfileByIdOrName } =
+      await importFreshProviderProfileModules()
+
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [
+        buildProfile({ id: 'prof_alpha', name: 'Alpha Route' }),
+      ],
+    }))
+
+    expect(findProviderProfileByIdOrName('alpha route')?.id).toBe('prof_alpha')
+    expect(findProviderProfileByIdOrName('  ALPHA ROUTE  ')?.id).toBe('prof_alpha')
+  })
+
+  test('prefers id over name when both match different profiles', async () => {
+    const { findProviderProfileByIdOrName } =
+      await importFreshProviderProfileModules()
+
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [
+        buildProfile({ id: 'prof_a', name: 'Shared Name', model: 'a-model' }),
+        buildProfile({ id: 'shared_name_id', name: 'Other', model: 'b-model' }),
+      ],
+    }))
+
+    expect(findProviderProfileByIdOrName('shared_name_id')?.id).toBe('shared_name_id')
+  })
+
+  test('returns undefined for unknown/blank selectors', async () => {
+    const { findProviderProfileByIdOrName } =
+      await importFreshProviderProfileModules()
+
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [buildProfile()],
+    }))
+
+    expect(findProviderProfileByIdOrName('no-such-profile')).toBeUndefined()
+    expect(findProviderProfileByIdOrName('')).toBeUndefined()
+    expect(findProviderProfileByIdOrName('   ')).toBeUndefined()
+    expect(findProviderProfileByIdOrName(undefined)).toBeUndefined()
+  })
+})

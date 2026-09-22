@@ -333,7 +333,7 @@ function BriefSpinner(t0) {
     t2 = $[2];
   }
   useEffect(t1, t2);
-  const [, time] = useAnimationFrame(reducedMotion ? null : 120);
+  const [, time] = useAnimationFrame(reducedMotion ? null : 80);
   const runningCount = useAppState(_temp6);
   const showConnWarning = connStatus === "reconnecting" || connStatus === "disconnected";
   const connText = connStatus === "reconnecting" ? "Reconnecting" : "Disconnected";
@@ -498,7 +498,7 @@ export function Spinner() {
   const $ = _c(8);
   const settings = useSettings();
   const reducedMotion = settings.prefersReducedMotion ?? false;
-  const [ref, time] = useAnimationFrame(reducedMotion ? null : 120);
+  const [ref, time] = useAnimationFrame(reducedMotion ? null : 80);
   if (reducedMotion) {
     let t0;
     if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
@@ -517,7 +517,7 @@ export function Spinner() {
     }
     return t1;
   }
-  const frame = Math.floor(time / 120) % SPINNER_FRAMES.length;
+  const frame = Math.floor(time / 80) % SPINNER_FRAMES.length;
   const t0 = SPINNER_FRAMES[frame];
   let t1;
   if ($[3] !== t0) {

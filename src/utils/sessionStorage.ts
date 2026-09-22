@@ -4613,6 +4613,12 @@ export function isLoggableMessage(m: Message): boolean {
     ) {
       return true
     }
+    if (
+      m.attachment.type === 'deferred_tools_delta' ||
+      m.attachment.type === 'mcp_instructions_delta'
+    ) {
+      return true
+    }
     return false
   }
   return true

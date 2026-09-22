@@ -13,7 +13,9 @@ export type ContextWindowOverride = {
 export type ContextWindowOverrides = Record<string, ContextWindowOverride>
 
 function normalizeModel(model: string): string {
-  return model.trim().toLowerCase()
+  // Match normalizeModelApiName behavior: strip query params before lookup
+  // so overrides work consistently with catalog matching
+  return model.trim().toLowerCase().split('?')[0]
 }
 
 /**

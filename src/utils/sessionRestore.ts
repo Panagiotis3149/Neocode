@@ -44,6 +44,8 @@ import { createSystemMessage } from './messages.js'
 import { parseUserSpecifiedModel } from './model/model.js'
 import { getPlansDirectory } from './plans.js'
 import { setCwd } from './Shell.js'
+import { findCanonicalGitRoot } from './git.js'
+import { assertExistingWorktreePath } from './worktreePathSecurity.js'
 import {
   adoptResumedSessionFile,
   recordContentReplacement,
@@ -319,9 +321,8 @@ type ResumeLoadResult = {
  * the last worktree enter/exit; if the session crashed while inside a
  * worktree (last entry = session object, not null), cd back into it.
  *
- * process.chdir is the TOCTOU-safe existence check — it throws ENOENT if
- * the /exit dialog removed the directory, or if the user deleted it
- * manually between sessions.
+ * The persisted path is canonicalized and checked against the original
+ * project before changing the process directory.
  *
  * When --worktree already created a fresh worktree, that takes precedence
  * over the resumed session's state. restoreSessionMetadata just overwrote
@@ -339,8 +340,20 @@ export function restoreWorktreeForResume(
   }
   if (!worktreeSession) return
 
+  const projectRoot =
+    findCanonicalGitRoot(worktreeSession.originalCwd) ??
+    worktreeSession.originalCwd
+
   try {
-    process.chdir(worktreeSession.worktreePath)
+    const worktreePath = assertExistingWorktreePath(
+      worktreeSession.worktreePath,
+      projectRoot,
+    )
+    process.chdir(worktreePath)
+
+    setCwd(worktreePath)
+    setOriginalCwd(getCwd())
+    restoreWorktreeSession({ ...worktreeSession, worktreePath })
   } catch {
     // Directory is gone. Override the stale cache so the next
     // reAppendSessionMetadata records "exited" instead of re-persisting
@@ -349,8 +362,6 @@ export function restoreWorktreeForResume(
     return
   }
 
-  setCwd(worktreeSession.worktreePath)
-  setOriginalCwd(getCwd())
   // projectRoot is intentionally NOT set here. The transcript doesn't record
   // whether the worktree was entered via --worktree (which sets projectRoot)
   // or EnterWorktreeTool (which doesn't). Leaving projectRoot stable matches

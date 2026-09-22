@@ -1,0 +1,75 @@
+<idea-plugin>
+    <id>wtf.pana.neocode.jetbrains-plugin</id>
+    <name>Neocode</name>
+    <vendor email="pana@wtf.tw" url="https://github.com/Panagiotis3149/neocode">Panagiotis3149</vendor>
+
+    <description><![CDATA[
+        Neocode integration for JetBrains IDEs.
+        Connects an active Neocode (Claude Code fork) CLI session to the IDE over MCP,
+        enabling in-IDE diff review, file navigation, diagnostics capture, and sending
+        selected text to the model context.
+    ]]></description>
+
+    <change-notes><![CDATA[
+        <em>1.0.0 (unreleased): Initial scaffold.</em>
+    ]]></change-notes>
+
+    <!-- Target IDE version window; mirrors build.gradle ideaVersion. -->
+    <idea-version since-build="242" until-build="243.*"/>
+
+    <!-- Module dependencies (Kotlin bundled with IDE). -->
+    <depends>com.intellij.modules.platform</depends>
+    <depends>org.jetbrains.kotlin</depends>
+    <!-- Terminal plugin: required by JBTerminalWidget / LocalTerminalDirectRunner used in NeocodeToolWindowPanel. -->
+    <depends>org.jetbrains.plugins.terminal</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- PostStartupActivity: starts MCPService, writes lockfile. -->
+        <postStartupActivity implementation="wtf.pana.neocode.jetbrains.startup.PostStartupActivity"/>
+
+        <!-- Application-level service: MCP server + connection state. -->
+        <applicationService serviceImplementation="wtf.pana.neocode.jetbrains.services.MCPService"/>
+
+        <!-- Project-level service: tool dispatch per project. -->
+        <projectService serviceImplementation="wtf.pana.neocode.jetbrains.tools.ToolManager"/>
+
+        <!-- Notification group for IDE balloons. -->
+        <notificationGroup id="Neocode" displayType="STICKY_BALLOON"/>
+
+        <!-- Tool window: right strip (right-bottom), hidden by default, shows on click. -->
+        <toolWindow id="Neocode"
+                    anchor="right"
+                    secondary="true"
+                    icon="/icons/NeocodeNcWhiteWhat.png"
+                    factoryClass="wtf.pana.neocode.jetbrains.NeocodeToolWindowFactory"/>
+    </extensions>
+
+    <actions>
+        <!-- Right-click menu action: send selected text to Neocode context. -->
+        <action id="Neocode.SendToNeocode"
+                class="wtf.pana.neocode.jetbrains.actions.SendToClaudeAction"
+                text="Add to Neocode Context"
+                description="Append the selected text to the active Neocode conversation context">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+
+        <!-- Tools menu entry: open Neocode CLI in embedded terminal. -->
+        <action id="Neocode.OpenInTerminal"
+                class="wtf.pana.neocode.jetbrains.actions.OpenClaudeInTerminalAction"
+                text="Open Neocode in Terminal"
+                description="Launch a Neocode CLI session in the IDE's terminal panel">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+
+        <!-- Session list toolbar action: opens the SessionListDialog.
+             Registered under the Tools menu so it's reachable even before
+             the tool window is open. -->
+        <action id="Neocode.ShowSessions"
+                class="wtf.pana.neocode.jetbrains.toolwindow.ShowSessionsAction"
+                text="Neocode Sessions…"
+                description="List, create, switch, share, or delete Neocode sessions"
+                icon="/icons/NeocodeNcWhiteWhat.png">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>

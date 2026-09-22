@@ -2315,6 +2315,57 @@ class OpenAIShimMessages {
       }
     }
 
+    if (reasoningRequestPlan.wireFormat === 'nvidia_nim_glm') {
+      // NVIDIA NIM GLM-5.2 uses top-level enable_thinking (boolean) and
+      // clear_thinking (boolean) instead of extra_body nesting.
+      delete body.reasoning_effort
+      if (reasoningRequestPlan.thinkingType === 'disabled') {
+        body.enable_thinking = false
+        body.clear_thinking = true
+      } else {
+        body.enable_thinking = true
+        body.clear_thinking = true
+      }
+    }
+
+    if (reasoningRequestPlan.wireFormat === 'deepseek_v4') {
+      // NVIDIA NIM DeepSeek V4: thinking (boolean) + reasoning_effort string
+      // inside chat_template_kwargs. Both fields live at the root level.
+      delete body.reasoning_effort
+      if (reasoningRequestPlan.thinkingType === 'disabled') {
+        delete body.chat_template_kwargs
+        delete body.thinking
+      } else {
+        body.thinking = true
+        if (reasoningRequestPlan.reasoningEffort) {
+          body.reasoning_effort = reasoningRequestPlan.reasoningEffort
+        }
+      }
+    }
+
+    if (reasoningRequestPlan.wireFormat === 'inkling_compatible') {
+      // NVIDIA NIM Inkling: string effort level as reasoning_effort at root.
+      // No boolean toggle — effort is always present.
+      delete body.reasoning_effort
+      if (reasoningRequestPlan.thinkingType !== 'disabled') {
+        body.reasoning_effort = reasoningRequestPlan.reasoningEffort || 'high'
+      }
+    }
+
+    if (reasoningRequestPlan.wireFormat === 'minimax_m3') {
+      // NVIDIA NIM MiniMax M3: thinking_mode string inside chat_template_kwargs.
+      // Values: "disabled" | "adaptive" | "enabled".
+      delete body.reasoning_effort
+      delete body.chat_template_kwargs
+      if (reasoningRequestPlan.thinkingType === 'disabled') {
+        body.chat_template_kwargs = { thinking_mode: 'disabled' }
+      } else if (reasoningRequestPlan.reasoningEffort) {
+        body.chat_template_kwargs = { thinking_mode: reasoningRequestPlan.reasoningEffort }
+      } else {
+        body.chat_template_kwargs = { thinking_mode: 'enabled' }
+      }
+    }
+
     // User-configured override (via /effort enable <model|prefix>): emit the
     // user-chosen wire param name instead of the fixed reasoning_effort field.
     if (

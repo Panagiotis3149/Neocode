@@ -96,6 +96,8 @@ import {
   isToolSearchEnabled,
 } from '../../utils/toolSearch.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../analytics/growthbook.js'
+import { getRawCompactionBinding, sanitizeCompactionPayload, shouldUseRawCapsuleCompaction, validateCompactionSanitizedOutput, type EncryptedRawCapsuleStore } from './rawCapsules.js'
+import type { FeatureGateRequest } from '../memoryV2/featureGates.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -312,6 +314,52 @@ export interface CompactionResult {
   compactionUsage?: ReturnType<typeof getTokenUsage>
 }
 
+export function isRawCapsuleCompactionEnabled(gates: FeatureGateRequest = {}): boolean {
+  return shouldUseRawCapsuleCompaction(gates)
+}
+
+export async function persistRawCompactionCapsule(input: Readonly<{
+  store: EncryptedRawCapsuleStore
+  capsuleId: string
+  rawArtifactIds: readonly string[]
+  summarize: Parameters<EncryptedRawCapsuleStore['createCapsule']>[0]['summarize']
+  gates?: FeatureGateRequest
+}>): Promise<Awaited<ReturnType<EncryptedRawCapsuleStore['createCapsule']>> | null> {
+  if (!isRawCapsuleCompactionEnabled(input.gates)) return null
+  return input.store.createCapsule({ capsuleId: input.capsuleId, rawArtifactIds: input.rawArtifactIds, summarize: input.summarize })
+}
+
+export { configureRawCompactionBinding } from './rawCapsules.js'
+
+export async function captureRawCompactionMessages(messages: readonly Message[]): Promise<readonly string[]> {
+  const binding = getRawCompactionBinding()
+  if (!binding || !isRawCapsuleCompactionEnabled(binding.gates)) return []
+  const now = binding.now?.() ?? Date.now()
+  const rawArtifactIds: string[] = []
+  const sourceMessages = messages.filter(message => !isCompactBoundaryMessage(message) && !(message?.type === 'user' && message?.isCompactSummary === true))
+  for (const [index, message] of sourceMessages.entries()) {
+    const artifactId = `message:${typeof message?.uuid === 'string' ? message.uuid : index}`
+    if (await binding.store.hasRaw(artifactId)) {
+      rawArtifactIds.push(artifactId)
+      continue
+    }
+    const serialized = (() => {
+      try {
+        return JSON.stringify(message)
+      } catch {
+        return String(message)
+      }
+    })()
+    await binding.store.appendRaw({ artifactId, sequence: BigInt(index), timestamp: now, retentionDeadline: binding.sessionRetentionDeadline, content: serialized })
+    rawArtifactIds.push(artifactId)
+  }
+  if (binding.summarize && rawArtifactIds.length > 0) {
+    const capsuleId = `compaction:${rawArtifactIds[0]}:${rawArtifactIds.at(-1)}`
+    if (!(await binding.store.hasCapsule(capsuleId))) await binding.store.createCapsule({ capsuleId, rawArtifactIds, summarize: binding.summarize })
+  }
+  return Object.freeze(rawArtifactIds)
+}
+
 /**
  * Diagnosis context passed from autoCompactIfNeeded into compactConversation.
  * Lets the tengu_compact event disambiguate same-chain loops (H2) from
@@ -400,6 +448,8 @@ export async function compactConversation(
     if (messages.length === 0) {
       throw new Error(ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)
     }
+
+    await captureRawCompactionMessages(messages)
 
     const preCompactTokenCount = tokenCountWithEstimation(messages)
 
@@ -809,6 +859,8 @@ export async function partialCompactConversation(
       )
     }
 
+    await captureRawCompactionMessages(messagesToSummarize)
+
     const preCompactTokenCount = tokenCountWithEstimation(allMessages)
 
     context.onCompactProgress?.({
@@ -1177,6 +1229,20 @@ async function streamCompactSummary({
       )
     : undefined
 
+  const sanitizedRequest = sanitizeCompactionPayload({
+    messages,
+    summaryRequest,
+    cacheSafeParams,
+  })
+  const sanitizedEnvelope = sanitizedRequest.sanitized as {
+    messages: Message[]
+    summaryRequest: UserMessage
+    cacheSafeParams: CacheSafeParams
+  }
+  const sanitizedMessages = sanitizedEnvelope.messages
+  const sanitizedSummaryRequest = sanitizedEnvelope.summaryRequest
+  const sanitizedCacheSafeParams = sanitizedEnvelope.cacheSafeParams
+
   try {
     if (promptCacheSharingEnabled) {
       try {
@@ -1188,8 +1254,8 @@ async function streamCompactSummary({
         // The streaming fallback path (below) can safely set maxOutputTokensOverride
         // since it doesn't share cache with the main thread.
         const result = await runForkedAgent({
-          promptMessages: [summaryRequest],
-          cacheSafeParams,
+          promptMessages: [sanitizedSummaryRequest],
+          cacheSafeParams: sanitizedCacheSafeParams,
           canUseTool: createCompactCanUseTool(),
           querySource: 'compact',
           forkLabel: 'compact',
@@ -1228,6 +1294,7 @@ async function streamCompactSummary({
                   : 0,
             })
           }
+          validateCompactionSanitizedOutput(sanitizedRequest, assistantText)
           return assistantMsg
         }
         logForDebugging(
@@ -1295,8 +1362,8 @@ async function streamCompactSummary({
         messages: normalizeMessagesForAPI(
           stripImagesFromMessages(
             stripReinjectedAttachments([
-              ...getMessagesAfterCompactBoundary(messages),
-              summaryRequest,
+              ...getMessagesAfterCompactBoundary(sanitizedMessages),
+              sanitizedSummaryRequest,
             ]),
           ),
           context.options.tools,
@@ -1359,6 +1426,8 @@ async function streamCompactSummary({
       }
 
       if (response) {
+        const responseText = getAssistantMessageText(response)
+        if (responseText !== null) validateCompactionSanitizedOutput(sanitizedRequest, responseText)
         return response
       }
 

@@ -301,6 +301,7 @@ export type SubagentContextOverrides = {
    * state reconstructed from the resumed sidechain so the same results
    * are re-replaced (prompt cache stability). */
   contentReplacementState?: ContentReplacementState
+  subagentRuntime?: ToolUseContext['subagentRuntime']
 }
 
 /**
@@ -447,6 +448,8 @@ export function createSubagentContext(
     // Generate new agentId for subagents (each subagent should have its own ID)
     agentId: overrides?.agentId ?? createAgentId(),
     agentType: overrides?.agentType,
+    subagentRuntime: overrides?.subagentRuntime,
+    subagentSupervisor: parentContext.subagentSupervisor,
 
     // Create new query tracking chain for subagent with incremented depth
     queryTracking: {

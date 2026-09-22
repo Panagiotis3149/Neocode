@@ -341,8 +341,21 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
 export function assembleToolPool(
   permissionContext: ToolPermissionContext,
   mcpTools: Tools,
+  includeSubagentMessaging = false,
 ): Tools {
   const builtInTools = getTools(permissionContext)
+  const subagentMessagingTool = includeSubagentMessaging
+    ? getSendMessageTool()
+    : undefined
+  const builtInToolsWithMessaging =
+    subagentMessagingTool &&
+    !builtInTools.some(tool => tool.name === subagentMessagingTool.name)
+      ? [...builtInTools, subagentMessagingTool]
+      : builtInTools
+  const allowedBuiltInTools = filterToolsByDenyRules(
+    builtInToolsWithMessaging,
+    permissionContext,
+  )
 
   // Filter out MCP tools that are in the deny list, and filter out any null/undefined
   // tools that might have been added by MCP client initialization
@@ -358,7 +371,7 @@ export function assembleToolPool(
   // readonly so copy-then-sort; allowedMcpTools is a fresh .filter() result.
   const byName = (a: Tool, b: Tool) => a.name.localeCompare(b.name)
   return uniqBy(
-    [...builtInTools].sort(byName).concat(allowedMcpTools.sort(byName)),
+    [...allowedBuiltInTools].sort(byName).concat(allowedMcpTools.sort(byName)),
     'name',
   )
 }

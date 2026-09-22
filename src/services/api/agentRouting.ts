@@ -1,4 +1,8 @@
 import type { SettingsJson } from '../../utils/settings/types.js'
+import {
+  findProviderProfileByIdOrName,
+} from '../../utils/providerProfiles.js'
+import { getPrimaryModel } from '../../utils/providerModels.js'
 
 /**
  * Provider override resolved from agent routing config.
@@ -127,6 +131,28 @@ export function resolveAgentModelProvider(
   }
 
   return null
+}
+
+/**
+ * Resolve a named provider profile (id or display name, per the /model profile
+ * picker) into a ProviderOverride for agent routing. Returns null when no
+ * selector is given or the profile cannot be resolved — callers should then
+ * fall back to the settings-derived override.
+ */
+export function resolveAgentProviderProfile(
+  options: { provider?: string } | undefined,
+): ProviderOverride | null {
+  const selector = options?.provider
+  if (!selector || !selector.trim()) return null
+
+  const profile = findProviderProfileByIdOrName(selector)
+  if (!profile) return null
+
+  return {
+    model: getPrimaryModel(profile.model),
+    baseURL: profile.baseUrl,
+    apiKey: profile.apiKey ?? '',
+  }
 }
 
 export function resolveAgentRunModelRouting({

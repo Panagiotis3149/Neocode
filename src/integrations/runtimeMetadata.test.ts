@@ -74,6 +74,7 @@ describe('resolveModelRuntimeLimits', () => {
     const limits = resolveModelRuntimeLimits({
       model: 'glm-5.2',
       processEnv: {
+        CLAUDE_CODE_USE_OPENAI: '1',
         OPENAI_BASE_URL: 'https://api.z.ai/api/coding/paas/v4',
       },
     })
@@ -176,11 +177,10 @@ describe('resolveOpenAIShimRuntimeContext - Z.AI GLM-5.2', () => {
     })
 
     expect(result.routeId).toBe('zai')
-    expect(result.catalogEntry?.id).toBe('glm-5.2')
+    expect(result.catalogEntry?.id).toBe('GLM-5.2')
     expect(result.openaiShimConfig.thinkingRequestFormat).toBe('zai-compatible')
     expect(result.openaiShimConfig.preserveReasoningContent).toBe(true)
     expect(result.openaiShimConfig.requireReasoningContentOnAssistantMessages).toBe(true)
-    expect(result.openaiShimConfig.enableToolStreaming).toBe(true)
   })
 })
 

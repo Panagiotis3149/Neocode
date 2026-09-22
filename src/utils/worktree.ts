@@ -44,47 +44,15 @@ import {
 } from './settings/settings.js'
 import { sleep } from './sleep.js'
 import { isInITerm2 } from './swarm/backends/detection.js'
-
-const VALID_WORKTREE_SLUG_SEGMENT = /^[a-zA-Z0-9._-]+$/
-const MAX_WORKTREE_SLUG_LENGTH = 64
-
-/**
- * Validates a worktree slug to prevent path traversal and directory escape.
- *
- * The slug is joined into `.claude/worktrees/<slug>` via path.join, which
- * normalizes `..` segments — so `../../../target` would escape the worktrees
- * directory. Similarly, an absolute path (leading `/` or `C:\`) would discard
- * the prefix entirely.
- *
- * Forward slashes are allowed for nesting (e.g. `asm/feature-foo`); each
- * segment is validated independently against the allowlist, so `.` / `..`
- * segments and drive-spec characters are still rejected.
- *
- * Throws synchronously — callers rely on this running before any side effects
- * (git commands, hook execution, chdir).
- */
-export function validateWorktreeSlug(slug: string): void {
-  if (slug.length > MAX_WORKTREE_SLUG_LENGTH) {
-    throw new Error(
-      `Invalid worktree name: must be ${MAX_WORKTREE_SLUG_LENGTH} characters or fewer (got ${slug.length})`,
-    )
-  }
-  // Leading or trailing `/` would make path.join produce an absolute path
-  // or a dangling segment. Splitting and validating each segment rejects
-  // both (empty segments fail the regex) while allowing `user/feature`.
-  for (const segment of slug.split('/')) {
-    if (segment === '.' || segment === '..') {
-      throw new Error(
-        `Invalid worktree name "${slug}": must not contain "." or ".." path segments`,
-      )
-    }
-    if (!VALID_WORKTREE_SLUG_SEGMENT.test(segment)) {
-      throw new Error(
-        `Invalid worktree name "${slug}": each "/"-separated segment must be non-empty and contain only letters, digits, dots, underscores, and dashes`,
-      )
-    }
-  }
-}
+import {
+  assertExistingPathWithinRoot,
+  assertExistingWorktreePath,
+  assertPathWithinRoot,
+  assertWorktreePathForCreation,
+  isPathWithin,
+  validateWorktreeSlug,
+} from './worktreePathSecurity.js'
+export { validateWorktreeSlug } from './worktreePathSecurity.js'
 
 // Helper function to create directories recursively
 async function mkdirRecursive(dirPath: string): Promise<void> {
@@ -118,6 +86,10 @@ async function symlinkDirectories(
     const destPath = join(worktreePath, dir)
 
     try {
+      if (!isPathWithin(repoRootPath, sourcePath)) {
+        continue
+      }
+      assertExistingPathWithinRoot(sourcePath, repoRootPath)
       await symlink(sourcePath, destPath, 'dir')
       logForDebugging(
         `Symlinked ${dir} from main repository to worktree to avoid disk bloat`,
@@ -289,6 +261,7 @@ async function getOrCreateWorktree(
 ): Promise<WorktreeCreateResult> {
   const worktreePath = worktreePathFor(repoRoot, slug)
   const worktreeBranch = worktreeBranchName(slug)
+  await assertWorktreePathForCreation(repoRoot, worktreePath)
 
   // Fast resume path: if the worktree already exists skip fetch and creation.
   // Read the .git pointer file directly (no subprocess, no upward walk) — a
@@ -317,6 +290,7 @@ async function getOrCreateWorktree(
 
     // New worktree: fetch base branch then add
     await mkdir(worktreesDir(repoRoot), { recursive: true })
+    await assertWorktreePathForCreation(repoRoot, worktreePath)
 
     const fetchEnv = { ...process.env, ...GIT_NO_PROMPT_ENV }
 
@@ -393,6 +367,7 @@ async function getOrCreateWorktree(
     if (createCode !== 0) {
       throw new Error(`Failed to create worktree: ${createStderr}`)
     }
+    await assertWorktreePathForCreation(repoRoot, worktreePath)
 
     if (sparsePaths?.length) {
       // If sparse-checkout or checkout fail after --no-checkout, the worktree
@@ -545,6 +520,8 @@ export async function copyWorktreeIncludeFiles(
     const srcPath = join(repoRoot, relativePath)
     const destPath = join(worktreePath, relativePath)
     try {
+      await assertPathWithinRoot(srcPath, repoRoot)
+      await assertPathWithinRoot(destPath, worktreePath)
       await mkdir(dirname(destPath), { recursive: true })
       await copyFile(srcPath, destPath)
       copied.push(relativePath)
@@ -573,6 +550,8 @@ async function performPostCreationSetup(
   repoRoot: string,
   worktreePath: string,
 ): Promise<void> {
+  await assertWorktreePathForCreation(repoRoot, worktreePath)
+
   // Copy settings.local.json to the worktree's .claude directory
   // This propagates local settings (which may contain secrets) to the worktree
   const localSettingsRelativePath =
@@ -580,6 +559,7 @@ async function performPostCreationSetup(
   const sourceSettingsLocal = join(repoRoot, localSettingsRelativePath)
   try {
     const destSettingsLocal = join(worktreePath, localSettingsRelativePath)
+    await assertPathWithinRoot(destSettingsLocal, worktreePath)
     await mkdirRecursive(dirname(destSettingsLocal))
     await copyFile(sourceSettingsLocal, destSettingsLocal)
     logForDebugging(
@@ -776,13 +756,18 @@ export async function createWorktreeForSession(
   // Try hook-based worktree creation first (allows user-configured VCS)
   if (hasWorktreeCreateHook()) {
     const hookResult = await executeWorktreeCreateHook(slug)
+    const projectRoot = findCanonicalGitRoot(originalCwd) ?? originalCwd
+    const worktreePath = assertExistingWorktreePath(
+      hookResult.worktreePath,
+      projectRoot,
+    )
     logForDebugging(
-      `Created hook-based worktree at: ${hookResult.worktreePath}`,
+      `Created hook-based worktree at: ${worktreePath}`,
     )
 
     currentWorktreeSession = {
       originalCwd,
-      worktreePath: hookResult.worktreePath,
+      worktreePath,
       worktreeName: slug,
       sessionId,
       tmuxSessionName,
@@ -973,11 +958,16 @@ export async function createAgentWorktree(slug: string): Promise<{
   // Try hook-based worktree creation first (allows user-configured VCS)
   if (hasWorktreeCreateHook()) {
     const hookResult = await executeWorktreeCreateHook(slug)
+    const projectRoot = findCanonicalGitRoot(getCwd()) ?? getCwd()
+    const worktreePath = assertExistingWorktreePath(
+      hookResult.worktreePath,
+      projectRoot,
+    )
     logForDebugging(
-      `Created hook-based agent worktree at: ${hookResult.worktreePath}`,
+      `Created hook-based agent worktree at: ${worktreePath}`,
     )
 
-    return { worktreePath: hookResult.worktreePath, hookBased: true }
+    return { worktreePath, hookBased: true }
   }
 
   // Fall back to git worktree
@@ -1146,6 +1136,12 @@ export async function cleanupStaleAgentWorktrees(
 
     const worktreePath = join(dir, slug)
     if (currentPath === worktreePath) {
+      continue
+    }
+
+    try {
+      assertExistingWorktreePath(worktreePath, gitRoot)
+    } catch {
       continue
     }
 
@@ -1324,7 +1320,11 @@ export async function execIntoTmuxWorktree(args: string[]): Promise<{
   if (hasWorktreeCreateHook()) {
     try {
       const hookResult = await executeWorktreeCreateHook(worktreeName)
-      worktreeDir = hookResult.worktreePath
+      const projectRoot = findCanonicalGitRoot(getCwd()) ?? getCwd()
+      worktreeDir = assertExistingWorktreePath(
+        hookResult.worktreePath,
+        projectRoot,
+      )
     } catch (error) {
       return {
         handled: false,

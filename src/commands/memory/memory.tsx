@@ -11,6 +11,7 @@ import { getClaudeConfigHomeDir } from '../../utils/envUtils.js';
 import { getErrnoCode } from '../../utils/errors.js';
 import { logError } from '../../utils/log.js';
 import { editFileInEditor } from '../../utils/promptEditor.js';
+import { MEMORY_ONLY_FORGET_MESSAGE, SESSION_HISTORY_DELETE_COMMANDS } from '../../memdir/memdir.js';
 function MemoryCommand({
   onDone
 }: {
@@ -76,6 +77,10 @@ function MemoryCommand({
           <Text dimColor>
             Learn more: <Link url="https://code.claude.com/docs/en/memory" />
           </Text>
+        </Box>
+        <Box flexDirection="column" marginTop={1}>
+          <Text dimColor>{MEMORY_ONLY_FORGET_MESSAGE}</Text>
+          <Text dimColor>Use {SESSION_HISTORY_DELETE_COMMANDS} to remove saved session history.</Text>
         </Box>
       </Box>
     </Dialog>;

@@ -181,6 +181,27 @@ function supportsZaiReasoningEffort(model: string | undefined): boolean {
   return normalized === 'glm-5.2' || normalized === 'zai-org/glm-5.2'
 }
 
+function modelLooksDeepSeekV4ViaNim(model: string): boolean {
+  return providerScopedModelSegments(model).some(segment =>
+    (segment.startsWith('deepseek') && segment.includes('v4')) ||
+    segment.startsWith('accounts/deepseek-ai/models/deepseek-v4'),
+  )
+}
+
+function modelLooksInklingCompatible(model: string): boolean {
+  const normalized = normalizedBaseModel(model)
+  return normalized.startsWith('inkling') || normalized.startsWith('inkling/')
+}
+
+function modelLooksMiniMaxM3(model: string): boolean {
+  const normalized = normalizedBaseModel(model)
+  return (
+    normalized.startsWith('minimax-m3') ||
+    normalized.startsWith('minimax/m3') ||
+    normalized.startsWith('accounts/minimax/models/minimax-m3')
+  )
+}
+
 function normalizeReasoningThinkingType(
   value: string | undefined,
 ): 'enabled' | 'disabled' | undefined {
@@ -235,7 +256,27 @@ function resolveCompatibilityWireFormat(
   // top-level `reasoning_effort` param regardless of the underlying model
   // brand. This is what makes /effort useful for OpenRouter-served models
   // such as NovitaAI / Nvidia.
+  //
+  // NVIDIA NIM is also OpenAI-compatible and accepts `reasoning_effort` for
+  // most reasoning-capable models (e.g. Phi-4, DeepSeek R1 variants).
+  // However, GLM-family models via NVIDIA NIM use `enable_thinking` /
+  // `clear_thinking` top-level booleans instead of `reasoning_effort`.
   if (routeId === 'openrouter') {
+    return 'reasoning_effort'
+  }
+  if (routeId === 'nvidia-nim') {
+    if (modelLooksZaiCompatible(model)) {
+      return 'nvidia_nim_glm'
+    }
+    if (modelLooksDeepSeekV4ViaNim(model)) {
+      return 'deepseek_v4'
+    }
+    if (modelLooksInklingCompatible(model)) {
+      return 'inkling_compatible'
+    }
+    if (modelLooksMiniMaxM3(model)) {
+      return 'minimax_m3'
+    }
     return 'reasoning_effort'
   }
   if (modelLooksDeepSeekCompatible(model)) {
@@ -324,6 +365,63 @@ function resolveCompatibilityReasoningControl(
       controllable: true,
       mode: 'levels',
       levels,
+      defaultLevel: undefined,
+      wireFormat,
+      source: 'compat',
+    }
+  }
+
+  if (wireFormat === 'nvidia_nim_glm') {
+    // NVIDIA NIM GLM uses top-level enable_thinking (boolean) instead of
+    // reasoning_effort. No multi-level effort — just enabled/disabled.
+    return {
+      supportsReasoning: true,
+      controllable: true,
+      mode: 'levels',
+      levels: ['high'],
+      defaultLevel: undefined,
+      wireFormat,
+      source: 'compat',
+    }
+  }
+
+  if (wireFormat === 'deepseek_v4') {
+    // NVIDIA NIM DeepSeek V4: thinking (boolean) + optional reasoning_effort
+    // string ("high" | "max") in the same chat_template_kwargs object.
+    // We treat it as multi-level for /effort picker purposes.
+    return {
+      supportsReasoning: true,
+      controllable: true,
+      mode: 'levels',
+      levels: ['high', 'max'],
+      defaultLevel: undefined,
+      wireFormat,
+      source: 'compat',
+    }
+  }
+
+  if (wireFormat === 'inkling_compatible') {
+    // NVIDIA NIM Inkling: only string effort level inside chat_template_kwargs.
+    // No boolean toggle — reasoning_effort is always present.
+    return {
+      supportsReasoning: true,
+      controllable: true,
+      mode: 'levels',
+      levels: ['low', 'medium', 'high', 'max'],
+      defaultLevel: undefined,
+      wireFormat,
+      source: 'compat',
+    }
+  }
+
+  if (wireFormat === 'minimax_m3') {
+    // NVIDIA NIM MiniMax M3: thinking_mode string
+    // ("disabled" | "adaptive" | "enabled"). Map to disable/enable.
+    return {
+      supportsReasoning: true,
+      controllable: true,
+      mode: 'levels',
+      levels: ['high'],
       defaultLevel: undefined,
       wireFormat,
       source: 'compat',

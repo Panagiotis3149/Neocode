@@ -1,0 +1,66 @@
+import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
+
+plugins {
+    id 'java'
+    id 'org.jetbrains.kotlin.jvm' version '2.4.0'
+    id 'org.jetbrains.kotlin.plugin.serialization' version '2.4.0'
+    id 'org.jetbrains.intellij.platform' version '2.2.1'
+}
+
+group = 'wtf.pana.neocode.jetbrains-plugin'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+    intellijPlatform {
+        defaultRepositories()
+    }
+}
+
+dependencies {
+    intellijPlatform {
+        // Target IDE: IntelliJ IDEA Community (2024.2+). Other JB IDEs inherit compatibility.
+        intellijIdeaCommunity('2024.2')
+
+        // Bundled Kotlin plugin so the host IDE has Kotlin support for diffs.
+        bundledPlugin('org.jetbrains.kotlin')
+
+        // Bundled Terminal plugin so we can spawn an embedded terminal tab
+        // (OpenClaudeInTerminalAction uses TerminalView from this plugin).
+        bundledPlugin('org.jetbrains.plugins.terminal')
+
+        // Plugin tooling: verification, sign, buildPlugin tasks.
+        pluginVerifier()
+        zipSigner()
+    }
+
+    // JSON serialization for MCP protocol (kotlinx-serialization).
+    implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0'
+    // Raw NIO ByteBuffer primitives for hand-rolled WS framing (java.nio.ByteBuffer).
+
+    testImplementation 'org.jetbrains.kotlin:kotlin-test'
+}
+
+kotlin {
+    jvmToolchain(21)
+}
+
+intellijPlatform {
+    pluginConfiguration {
+        // metadata lives in plugin.xml; only build-side overrides here.
+        ideaVersion {
+            sinceBuild = '242'
+            untilBuild = '243.*'
+        }
+    }
+    pluginVerification {
+        ides {
+            ide(IntelliJPlatformType.IntellijIdeaCommunity, '2024.2')
+        }
+    }
+}
+
+test {
+    useJUnitPlatform()
+}

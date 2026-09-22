@@ -27,5 +27,5 @@ export function useShimmerAnimation(
   if (mode === 'requesting') {
     return [ref, (cyclePosition % cycleLength) - 10]
   }
-  return [ref, messageWidth + 10 - (cyclePosition % cycleLength)]
+  return [ref, messageWidth + 10 + (cyclePosition % cycleLength)]
 }

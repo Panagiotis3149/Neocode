@@ -5,6 +5,8 @@ import { join } from 'node:path'
 
 import {
   buildConversationChain,
+  cleanMessagesForLogging,
+  isLoggableMessage,
   loadTranscriptFile,
   stripPersistedToolUseResultsFromJSONLBuffer,
 } from './sessionStorage.ts'
@@ -12,6 +14,8 @@ import {
 const tempDirs: string[] = []
 const sessionId = '00000000-0000-4000-8000-000000000999'
 const ts = '2026-04-02T00:00:00.000Z'
+const originalUserType = process.env.USER_TYPE
+const originalSaveHookContext = process.env.CLAUDE_CODE_SAVE_HOOK_ADDITIONAL_CONTEXT
 
 function id(n: number): string {
   return `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -63,6 +67,14 @@ function assistant(uuid: string, parentUuid: string | null, text: string) {
   }
 }
 
+function attachment(uuid: string, type: string) {
+  return {
+    ...base(uuid, null),
+    type: 'attachment',
+    attachment: { type },
+  }
+}
+
 function compactBoundary(
   uuid: string,
   parentUuid: string | null,
@@ -97,6 +109,10 @@ async function writeJsonl(entries: unknown[]): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })))
+  if (originalUserType === undefined) delete process.env.USER_TYPE
+  else process.env.USER_TYPE = originalUserType
+  if (originalSaveHookContext === undefined) delete process.env.CLAUDE_CODE_SAVE_HOOK_ADDITIONAL_CONTEXT
+  else process.env.CLAUDE_CODE_SAVE_HOOK_ADDITIONAL_CONTEXT = originalSaveHookContext
 })
 
 test('loadTranscriptFile fails closed when preserved-segment tail is missing', async () => {
@@ -258,4 +274,38 @@ test('loadTranscriptFile omits raw toolUseResult for persisted-output transcript
   expect(
     (loaded?.message.content as Array<{ content: string }>)[0]?.content,
   ).toContain('Preview text')
+})
+
+test('external transcripts preserve resume-critical attachment deltas', () => {
+  delete process.env.USER_TYPE
+  delete process.env.CLAUDE_CODE_SAVE_HOOK_ADDITIONAL_CONTEXT
+
+  const messages = [
+    attachment(id(51), 'deferred_tools_delta'),
+    attachment(id(52), 'mcp_instructions_delta'),
+    attachment(id(53), 'hook_additional_context'),
+    attachment(id(54), 'other_attachment'),
+  ]
+
+  expect(messages.filter(isLoggableMessage).map(message => message.attachment.type)).toEqual([
+    'deferred_tools_delta',
+    'mcp_instructions_delta',
+  ])
+  expect(cleanMessagesForLogging(messages).map(message => message.attachment.type)).toEqual([
+    'deferred_tools_delta',
+    'mcp_instructions_delta',
+  ])
+})
+
+test('ant transcripts retain all attachment types', () => {
+  process.env.USER_TYPE = 'ant'
+
+  const messages = [
+    attachment(id(61), 'deferred_tools_delta'),
+    attachment(id(62), 'mcp_instructions_delta'),
+    attachment(id(63), 'hook_additional_context'),
+    attachment(id(64), 'other_attachment'),
+  ]
+
+  expect(messages.filter(isLoggableMessage)).toEqual(messages)
 })

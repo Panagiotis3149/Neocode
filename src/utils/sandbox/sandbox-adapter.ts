@@ -21,9 +21,8 @@ import {
   SandboxViolationStore,
 } from '@anthropic-ai/sandbox-runtime'
 import { rmSync, statSync } from 'fs'
-import { readFile } from 'fs/promises'
 import { memoize } from 'lodash-es'
-import { join, resolve, sep } from 'path'
+import { resolve } from 'path'
 import {
   getAdditionalDirectoriesForClaudeMd,
   getCwdState,
@@ -57,6 +56,7 @@ import { errorMessage } from '../errors.js'
 import { getClaudeTempDir } from '../permissions/filesystem.js'
 import type { PermissionRuleValue } from '../permissions/PermissionRule.js'
 import { ripgrepCommand } from '../ripgrep.js'
+import { findCanonicalGitRoot, findGitRoot } from '../git.js'
 
 // Local copies to avoid circular dependency
 // (permissions.ts imports SandboxManager, bashPermissions.ts imports permissions.ts)
@@ -416,32 +416,20 @@ function scrubBareGitRepoFiles(): void {
 /**
  * Detect if cwd is a git worktree and resolve the main repo path.
  * Called once during initialize() and cached for the session.
- * In a worktree, .git is a file (not a directory) containing "gitdir: ...".
- * If .git is a directory, readFile throws EISDIR and we return null.
+ * Canonical Git-root validation rejects forged worktree metadata.
  */
-async function detectWorktreeMainRepoPath(cwd: string): Promise<string | null> {
-  const gitPath = join(cwd, '.git')
-  try {
-    const gitContent = await readFile(gitPath, { encoding: 'utf8' })
-    const gitdirMatch = gitContent.match(/^gitdir:\s*(.+)$/m)
-    if (!gitdirMatch?.[1]) {
-      return null
-    }
-    // gitdir may be relative (rare, but git accepts it) — resolve against cwd
-    const gitdir = resolve(cwd, gitdirMatch[1].trim())
-    // gitdir format: /path/to/main/repo/.git/worktrees/worktree-name
-    // Match the /.git/worktrees/ segment specifically — indexOf('.git') alone
-    // would false-match paths like /home/user/.github-projects/...
-    const marker = `${sep}.git${sep}worktrees${sep}`
-    const markerIndex = gitdir.lastIndexOf(marker)
-    if (markerIndex > 0) {
-      return gitdir.substring(0, markerIndex)
-    }
-    return null
-  } catch {
-    // Not in a worktree, .git is a directory (EISDIR), or can't read .git file
+export async function detectWorktreeMainRepoPath(
+  cwd: string,
+): Promise<string | null> {
+  const gitRoot = findGitRoot(cwd)
+  if (!gitRoot) return null
+
+  const canonicalRoot = findCanonicalGitRoot(cwd)
+  if (!canonicalRoot || resolve(canonicalRoot) === resolve(gitRoot)) {
     return null
   }
+
+  return canonicalRoot
 }
 
 /**

@@ -56,6 +56,8 @@ import {
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../analytics/growthbook.js'
 import { logEvent } from '../analytics/index.js'
 import { sanitizeToolNameForAnalytics } from '../analytics/metadata.js'
+import { isFeatureGateEnabled, type FeatureGateRequest } from '../memoryV2/featureGates.js'
+import { sanitizeReviewerPayload } from '../memoryV2/reviewer.js'
 import {
   buildExtractAutoOnlyPrompt,
   buildExtractCombinedPrompt,
@@ -276,6 +278,10 @@ type AppendSystemMessageFn = (
   msg: Exclude<SystemMessage, SystemLocalCommandMessage>,
 ) => void
 
+export function sanitizeExtractionMessages(messages: Message[]): Message[] {
+  return sanitizeReviewerPayload(messages).sanitized as Message[]
+}
+
 /** The active extractor function, set by initExtractMemories(). */
 let extractor:
   | ((
@@ -293,7 +299,7 @@ let drainer: (timeoutMs?: number) => Promise<void> = async () => {}
  * overlap guard, pending context). Call once at startup alongside
  * initConfidenceRating/initPromptCoaching, or per-test in beforeEach.
  */
-export function initExtractMemories(): void {
+export function initExtractMemories(options: Readonly<{ memoryV2Gates?: FeatureGateRequest }> = {}): void {
   // --- Closure-scoped mutable state ---
 
   /** Every promise handed out by the extractor that hasn't settled yet.
@@ -370,6 +376,9 @@ export function initExtractMemories(): void {
 
     const canUseTool = createAutoMemCanUseTool(memoryDir)
     const cacheSafeParams = createCacheSafeParams(context)
+    if (isFeatureGateEnabled('MEMORY_REVIEWER', options.memoryV2Gates)) {
+      cacheSafeParams.forkContextMessages = sanitizeExtractionMessages(context.messages)
+    }
 
     // Only run extraction every N eligible turns (tengu_bramble_lintel, default 1).
     // Trailing extractions (from stashed contexts) skip this check since they

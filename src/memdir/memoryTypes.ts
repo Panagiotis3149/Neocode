@@ -21,6 +21,18 @@ export const MEMORY_TYPES = [
 export type MemoryType = (typeof MEMORY_TYPES)[number]
 
 /**
+ * Hard character limits per memory type.
+ * user=1375 (preferences), feedback/project/reference=2200 (project/model memories).
+ * Enforced at write time in extractMemories.ts and FileWriteTool validation for memory paths.
+ */
+export const MEMORY_TYPE_CHAR_LIMITS: Record<MemoryType, number> = {
+  user: 1375,
+  feedback: 2200,
+  project: 2200,
+  reference: 2200,
+} as const
+
+/**
  * Parse a raw frontmatter value into a MemoryType.
  * Invalid or missing values return undefined — legacy files without a
  * `type:` field keep working, files with unknown types degrade gracefully.
@@ -250,6 +262,7 @@ export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   'name: {{memory name}}',
   'description: {{one-line description — used to decide relevance in future conversations, so be specific}}',
   `type: {{${MEMORY_TYPES.join(', ')}}}`,
+  'truncated: {{true | false}}  // set by system when content exceeds type limit',
   '---',
   '',
   '{{memory content — for feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines}}',

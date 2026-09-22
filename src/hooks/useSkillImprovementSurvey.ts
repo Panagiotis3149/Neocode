@@ -80,6 +80,15 @@ export function useSkillImprovementSurvey(setMessages: SetMessages): {
               ),
             ])
           },
+          error => {
+            setMessages(prev => [
+              ...prev,
+              createSystemMessage(
+                `Skill "${current.skillName}" was not updated: ${error instanceof Error ? error.message : String(error)}`,
+                'suggestion',
+              ),
+            ])
+          },
         )
       }
 

@@ -130,6 +130,38 @@ export type SendMessageToolOutput =
   | RequestOutput
   | ResponseOutput
 
+function isSubagentAddress(to: string): boolean {
+  return to === 'main' || to.startsWith('subagent:')
+}
+
+async function handleSubagentMessage(
+  recipient: string,
+  content: string,
+  context: ToolUseContext,
+): Promise<{ data: MessageOutput } | undefined> {
+  if (!isSubagentAddress(recipient)) return undefined
+
+  const runtime = context.subagentRuntime
+  const supervisor = runtime?.supervisor ?? context.subagentSupervisor
+  if (!supervisor) return undefined
+
+  const sender = runtime?.agentName ?? TEAM_LEAD_NAME
+  const senderId = runtime?.agentId ?? 'main'
+  await supervisor.sendMessage(senderId, recipient, content)
+
+  return {
+    data: {
+      success: true,
+      message: `Message sent to ${recipient}`,
+      routing: {
+        sender,
+        target: `@${recipient}`,
+        content,
+      },
+    },
+  }
+}
+
 function findTeammateColor(
   appState: {
     teamContext?: { teammates: { [id: string]: { color?: string } } }
@@ -800,6 +832,13 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
       // Route to in-process subagent by name or raw agentId before falling
       // through to ambient-team resolution. Stopped agents are auto-resumed.
       if (typeof input.message === 'string' && input.to !== '*') {
+        const subagentResult = await handleSubagentMessage(
+          input.to,
+          input.message,
+          context,
+        )
+        if (subagentResult) return subagentResult
+
         const appState = context.getAppState()
         const registered = appState.agentNameRegistry.get(input.to)
         const agentId = registered ?? toAgentId(input.to)

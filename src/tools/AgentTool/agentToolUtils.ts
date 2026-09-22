@@ -57,6 +57,7 @@ import { emitTaskProgress as emitTaskProgressEvent } from '../../utils/task/sdkP
 import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import { getTokenCountFromUsage } from '../../utils/tokens.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../ExitPlanModeTool/constants.js'
+import { SEND_MESSAGE_TOOL_NAME } from '../SendMessageTool/constants.js'
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME } from './constants.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 export type ResolvedAgentTools = {
@@ -72,11 +73,13 @@ export function filterToolsForAgent({
   isBuiltIn,
   isAsync = false,
   permissionMode,
+  allowSubagentMessaging = false,
 }: {
   tools: Tools
   isBuiltIn: boolean
   isAsync?: boolean
   permissionMode?: PermissionMode
+  allowSubagentMessaging?: boolean
 }): Tools {
   return tools.filter(tool => {
     // Allow MCP tools for all agents
@@ -98,6 +101,9 @@ export function filterToolsForAgent({
       return false
     }
     if (isAsync && !ASYNC_AGENT_ALLOWED_TOOLS.has(tool.name)) {
+      if (allowSubagentMessaging && toolMatchesName(tool, SEND_MESSAGE_TOOL_NAME)) {
+        return true
+      }
       if (isAgentSwarmsEnabled() && isInProcessTeammate()) {
         // Allow AgentTool for in-process teammates to spawn sync subagents.
         // Validation in AgentTool.call() prevents background agents and teammate spawning.
@@ -127,6 +133,7 @@ export function resolveAgentTools(
   availableTools: Tools,
   isAsync = false,
   isMainThread = false,
+  allowSubagentMessaging = false,
 ): ResolvedAgentTools {
   const {
     tools: agentTools,
@@ -141,10 +148,11 @@ export function resolveAgentTools(
     ? availableTools
     : filterToolsForAgent({
         tools: availableTools,
-        isBuiltIn: source === 'built-in',
-        isAsync,
-        permissionMode,
-      })
+          isBuiltIn: source === 'built-in',
+          isAsync,
+          permissionMode,
+          allowSubagentMessaging,
+        })
 
   // Create a set of disallowed tool names for quick lookup
   const disallowedToolSet = new Set(

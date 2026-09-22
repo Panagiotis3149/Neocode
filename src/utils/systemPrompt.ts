@@ -7,7 +7,11 @@ import type { ToolUseContext } from '../Tool.js'
 import type { AgentDefinition } from '../tools/AgentTool/loadAgentsDir.js'
 import { isBuiltInAgent } from '../tools/AgentTool/loadAgentsDir.js'
 import { isEnvTruthy } from './envUtils.js'
-import { asSystemPrompt, type SystemPrompt } from './systemPromptType.js'
+import {
+  asSystemPrompt,
+  inheritSystemPromptMetadata,
+  type SystemPrompt,
+} from './systemPromptType.js'
 
 export { asSystemPrompt, type SystemPrompt } from './systemPromptType.js'
 
@@ -105,19 +109,24 @@ export function buildEffectiveSystemPrompt({
     (feature('PROACTIVE') || feature('KAIROS')) &&
     isProactiveActive_SAFE_TO_CALL_ANYWHERE()
   ) {
-    return asSystemPrompt([
-      ...defaultSystemPrompt,
-      `\n# Custom Agent Instructions\n${agentSystemPrompt}`,
-      ...(appendSystemPrompt ? [appendSystemPrompt] : []),
-    ])
+    return inheritSystemPromptMetadata(
+      asSystemPrompt([
+        ...defaultSystemPrompt,
+        `\n# Custom Agent Instructions\n${agentSystemPrompt}`,
+        ...(appendSystemPrompt ? [appendSystemPrompt] : []),
+      ]),
+      defaultSystemPrompt,
+    )
   }
 
-  return asSystemPrompt([
-    ...(agentSystemPrompt
-      ? [agentSystemPrompt]
-      : customSystemPrompt
-        ? [customSystemPrompt]
-        : defaultSystemPrompt),
-    ...(appendSystemPrompt ? [appendSystemPrompt] : []),
-  ])
+  const source = agentSystemPrompt || customSystemPrompt ? undefined : defaultSystemPrompt
+  const result = asSystemPrompt([
+      ...(agentSystemPrompt
+        ? [agentSystemPrompt]
+        : customSystemPrompt
+          ? [customSystemPrompt]
+          : defaultSystemPrompt),
+      ...(appendSystemPrompt ? [appendSystemPrompt] : []),
+    ])
+  return source ? inheritSystemPromptMetadata(result, source) : result
 }

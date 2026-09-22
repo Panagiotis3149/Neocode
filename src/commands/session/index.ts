@@ -1,4 +1,5 @@
 import { getIsRemoteMode } from '../../bootstrap/state.js'
+import { isMemoryV2CommandEnabled } from '../../services/memoryV2/commandHandlers.js'
 import type { Command } from '../../commands.js'
 
 const session = {
@@ -6,9 +7,9 @@ const session = {
   name: 'session',
   aliases: ['remote'],
   description: 'Show remote session URL and QR code',
-  isEnabled: () => getIsRemoteMode(),
+  isEnabled: () => getIsRemoteMode() || isMemoryV2CommandEnabled(),
   get isHidden() {
-    return !getIsRemoteMode()
+    return !getIsRemoteMode() && !isMemoryV2CommandEnabled()
   },
   load: () => import('./session.js'),
 } satisfies Command

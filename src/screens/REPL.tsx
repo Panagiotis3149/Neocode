@@ -54,6 +54,7 @@ import { MessageSelector } from '../components/MessageSelector.js';
 import { selectableUserMessagesFilter, messagesAfterAreOnlySynthetic } from '../utils/messageFilters.js';
 import { useIdeLogging } from '../hooks/useIdeLogging.js';
 import { PermissionRequest, type ToolUseConfirm } from '../components/permissions/PermissionRequest.js';
+import { SubagentPermissionRequest } from '../components/permissions/SubagentPermissionRequest.js';
 import { ElicitationDialog } from '../components/mcp/ElicitationDialog.js';
 import { PromptDialog } from '../components/hooks/PromptDialog.js';
 import type { PromptRequest, PromptResponse } from '../types/hooks.js';
@@ -159,6 +160,7 @@ import { useMergedCommands } from '../hooks/useMergedCommands.js';
 import { useSkillsChange } from '../hooks/useSkillsChange.js';
 import { useManagePlugins } from '../hooks/useManagePlugins.js';
 import { Messages } from '../components/Messages.js';
+import { SubagentEventStream } from '../components/SubagentEventStream.js';
 import { TaskListV2 } from '../components/TaskListV2.js';
 import { TeammateViewHeader } from '../components/TeammateViewHeader.js';
 import { useTasksV2WithCollapseEffect } from '../hooks/useTasksV2.js';
@@ -168,11 +170,13 @@ import type { ScopedMcpServerConfig } from '../services/mcp/types.js';
 import { randomUUID, type UUID } from 'crypto';
 import { processSessionStartHooks } from '../utils/sessionStart.js';
 import { executeSessionEndHooks, getSessionEndHookTimeoutMs } from '../utils/hooks.js';
-import { type IDESelection, useIdeSelection } from '../hooks/useIdeSelection.js';
+import { type IDESelection, useAddToContext, useIdeSelection } from '../hooks/useIdeSelection.js';
 import { getTools, assembleToolPool } from '../tools.js';
 import type { AgentDefinition } from '../tools/AgentTool/loadAgentsDir.js';
 import { resolveAgentTools } from '../tools/AgentTool/agentToolUtils.js';
 import { resumeAgentBackground } from '../tools/AgentTool/resumeAgent.js';
+import { createSubagentSupervisor } from '../tools/AgentTool/subagentSupervisor.js';
+import { useSubagentEventStream } from '../hooks/useSubagentEventStream.js';
 import { useMainLoopModel } from '../hooks/useMainLoopModel.js';
 import { useAppState, useSetAppState, useAppStateStore } from '../state/AppState.js';
 import type { ContentBlockParam, ImageBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs';
@@ -620,6 +624,14 @@ export function REPL({
   thinkingConfig
 }: Props): React.ReactNode {
   const isRemoteSession = !!remoteSessionConfig;
+  const subagentSupervisor = useMemo(() => createSubagentSupervisor(), []);
+  const subagentEvents = useSubagentEventStream(subagentSupervisor);
+
+  useEffect(() => () => {
+    for (const agent of subagentSupervisor.list()) {
+      void subagentSupervisor.terminate(agent.agentId);
+    }
+  }, [subagentSupervisor]);
 
   // Env-var gates hoisted to mount-time — isEnvTruthy does toLowerCase+trim+
   // includes, and these were on the render path (hot during PageUp spam).
@@ -1469,6 +1481,32 @@ export function REPL({
     cursorOffset: number;
     pastedContents: Record<number, PastedContent>;
   } | undefined>();
+
+  // IDE "Add to Context" right-click action: drain the FIFO populated by the
+  // mcp__ide__addToContext notification handler (see utils/ide.ts) and append
+  // each entry to the prompt input. Stability: `setInputValue` is a useCallback
+  // with stable deps; `inputValueRef` is a ref so the closure always sees the
+  // latest input without forcing the effect to re-subscribe. `addNotification`
+  // is stable from useNotifications.
+  const appendIdeContext = useCallback((text: string) => {
+    const prev = inputValueRef.current;
+    // Join additions with a blank line so multiple selections from the IDE
+    // stay visually separated in the prompt input.
+    const next = prev.trimEnd().length === 0 ? text : `${prev}\n\n${text}`;
+    setInputValue(next);
+  }, [setInputValue]);
+  const notifyIdeOversize = useCallback((entry: { textLength: number; fits: boolean }) => {
+    addNotification({
+      key: 'ide-add-to-context-oversize',
+      text: `IDE selection (${entry.textLength} chars) exceeds the context window — appended to input but may be truncated.`,
+      priority: 'medium',
+    });
+  }, [addNotification]);
+  useAddToContext(
+    isRemoteSession ? EMPTY_MCP_CLIENTS : mcp.clients,
+    appendIdeContext,
+    notifyIdeOversize,
+  );
 
   // Callback to filter commands based on CCR's available slash commands
   const handleRemoteInit = useCallback((remoteSlashCommands: string[]) => {
@@ -2557,13 +2595,14 @@ export function REPL({
     // for mid-query tool list updates.
     const computeTools = () => {
       const state = store.getState();
-      const assembled = assembleToolPool(state.toolPermissionContext, state.mcp.tools);
+      const assembled = assembleToolPool(state.toolPermissionContext, state.mcp.tools, true);
       const merged = mergeAndFilterTools(combinedInitialTools, assembled, state.toolPermissionContext.mode);
       if (!mainThreadAgentDefinition) return merged;
       return resolveAgentTools(mainThreadAgentDefinition, merged, false, true).resolvedTools;
     };
     return {
       abortController,
+      subagentSupervisor,
       options: {
         commands,
         tools: computeTools(),
@@ -2700,7 +2739,7 @@ export function REPL({
       contentReplacementState: contentReplacementStateRef.current,
       syncToolResultReplacements
     };
-  }, [commands, combinedInitialTools, mainThreadAgentDefinition, debug, initialMcpClients, ideInstallationStatus, dynamicMcpConfig, theme, allowedAgentTypes, store, setAppState, reverify, addNotification, setMessages, onChangeDynamicMcpConfig, resume, requestPrompt, disabled, customSystemPrompt, appendSystemPrompt, setConversationId, syncToolResultReplacements]);
+  }, [commands, combinedInitialTools, mainThreadAgentDefinition, debug, initialMcpClients, ideInstallationStatus, dynamicMcpConfig, theme, allowedAgentTypes, store, setAppState, reverify, addNotification, setMessages, onChangeDynamicMcpConfig, resume, requestPrompt, disabled, customSystemPrompt, appendSystemPrompt, setConversationId, syncToolResultReplacements, subagentSupervisor]);
 
   // Session backgrounding (Ctrl+B to background/foreground)
   const handleBackgroundQuery = useCallback(() => {
@@ -4621,6 +4660,20 @@ export function REPL({
   });
   // Auto-exit viewing mode when teammate completes or errors
   useTeammateViewAutoExit();
+  const pendingSubagentPermissionEvent = (() => {
+    const pending = new Map<string, Extract<import('../tools/AgentTool/subagentEventBus.js').SupervisorEvent, { type: 'subagent_permission_request' }>>();
+    for (const event of subagentEvents) {
+      if (event.type === 'subagent_permission_request') pending.set(event.requestId, event);
+      if (event.type === 'subagent_permission_response') pending.delete(event.requestId);
+    }
+    return [...pending.values()].at(-1);
+  })();
+  const subagentPermissionContext = pendingSubagentPermissionEvent
+    ? getToolUseContext(messages, messages, abortController ?? createAbortController(), mainLoopModel)
+    : undefined;
+  const subagentPermissionOverlay = pendingSubagentPermissionEvent && subagentPermissionContext
+    ? <SubagentPermissionRequest event={pendingSubagentPermissionEvent} supervisor={subagentSupervisor} toolUseContext={subagentPermissionContext} />
+    : null;
   if (screen === 'transcript') {
     // Virtual scroll replaces the 30-message cap: everything is scrollable
     // and memory is bounded by the viewport. Without it, wrapping transcript
@@ -4631,7 +4684,7 @@ export function REPL({
     // and transcript-mode are mutually exclusive (this early return), so
     // only one ScrollBox is ever mounted at a time.
     const transcriptScrollRef = isFullscreenEnvEnabled() && !disableVirtualScroll && !dumpMode ? scrollRef : undefined;
-    const transcriptMessagesElement = <Messages messages={transcriptMessages} tools={tools} commands={renderCommands} verbose={true} toolJSX={null} toolUseConfirmQueue={[]} inProgressToolUseIDs={inProgressToolUseIDs} isMessageSelectorVisible={false} conversationId={conversationId} screen={screen} agentDefinitions={agentDefinitions} streamingToolUses={transcriptStreamingToolUses} showAllInTranscript={showAllInTranscript} onOpenRateLimitOptions={handleOpenRateLimitOptions} isLoading={isLoading} hidePastThinking={true} streamingThinking={streamingThinking} scrollRef={transcriptScrollRef} jumpRef={jumpRef} onSearchMatchesChange={onSearchMatchesChange} scanElement={scanElement} setPositions={setPositions} disableRenderCap={dumpMode} />;
+    const transcriptMessagesElement = <><SubagentEventStream events={subagentEvents} /><Messages messages={transcriptMessages} tools={tools} commands={renderCommands} verbose={true} toolJSX={null} toolUseConfirmQueue={[]} inProgressToolUseIDs={inProgressToolUseIDs} isMessageSelectorVisible={false} conversationId={conversationId} screen={screen} agentDefinitions={agentDefinitions} streamingToolUses={transcriptStreamingToolUses} showAllInTranscript={showAllInTranscript} onOpenRateLimitOptions={handleOpenRateLimitOptions} isLoading={isLoading} hidePastThinking={true} streamingThinking={streamingThinking} scrollRef={transcriptScrollRef} jumpRef={jumpRef} onSearchMatchesChange={onSearchMatchesChange} scanElement={scanElement} setPositions={setPositions} disableRenderCap={dumpMode} /></>;
     const transcriptToolJSX = toolJSX && <Box flexDirection="column" width="100%">
       {toolJSX.jsx}
     </Box>;
@@ -4658,7 +4711,7 @@ export function REPL({
           // gets yellow. Next n/N re-establishes via step()→jump().
           onScroll={() => jumpRef.current?.disarmSearch()} /> : null}
       <CancelRequestHandler {...cancelRequestProps} />
-      {transcriptScrollRef ? <FullscreenLayout scrollRef={scrollRef} scrollable={<>
+      {transcriptScrollRef ? <FullscreenLayout scrollRef={scrollRef} overlay={subagentPermissionOverlay} scrollable={<>
         {transcriptMessagesElement}
         {transcriptToolJSX}
         <SandboxViolationExpandedView />
@@ -4702,6 +4755,7 @@ export function REPL({
         {transcriptMessagesElement}
         {transcriptToolJSX}
         <SandboxViolationExpandedView />
+        {subagentPermissionOverlay}
         <TranscriptModeFooter showAllInTranscript={showAllInTranscript} virtualScroll={false} suppressShowAll={dumpMode} status={editorStatus || undefined} />
       </>}
     </KeybindingSetup>;
@@ -4749,6 +4803,7 @@ export function REPL({
   // doesn't use the placeholder anyway.
   const placeholderText = userInputOnProcessing && !viewedAgentTask && displayedMessages.length <= userInputBaselineRef.current ? userInputOnProcessing : undefined;
   const toolPermissionOverlay = focusedInputDialog === 'tool-permission' ? <PermissionRequest key={toolUseConfirmQueue[0]?.toolUseID} onDone={() => setToolUseConfirmQueue(([_, ...tail]) => tail)} onReject={handleQueuedCommandOnCancel} toolUseConfirm={toolUseConfirmQueue[0]!} toolUseContext={getToolUseContext(messages, messages, abortController ?? createAbortController(), mainLoopModel)} verbose={verbose} workerBadge={toolUseConfirmQueue[0]?.workerBadge} setStickyFooter={isFullscreenEnvEnabled() ? setPermissionStickyFooter : undefined} /> : null;
+  const permissionOverlay = toolPermissionOverlay ?? subagentPermissionOverlay;
 
   // Narrow terminals: companion collapses to a one-liner that REPL stacks
   // on its own row (above input in fullscreen, below in scrollback) instead
@@ -4790,16 +4845,17 @@ export function REPL({
           the modal's inner ScrollBox is not keyboard-driven. onScroll
           stays suppressed while a modal is showing so scroll doesn't
           stamp divider/pill state. */}
-    <ScrollKeybindingHandler scrollRef={scrollRef} isActive={isFullscreenEnvEnabled() && (centeredModal != null || !focusedInputDialog || focusedInputDialog === 'tool-permission')} onScroll={centeredModal || toolPermissionOverlay || viewedAgentTask ? undefined : composedOnScroll} />
+    <ScrollKeybindingHandler scrollRef={scrollRef} isActive={isFullscreenEnvEnabled() && (centeredModal != null || !focusedInputDialog || focusedInputDialog === 'tool-permission')} onScroll={centeredModal || permissionOverlay || viewedAgentTask ? undefined : composedOnScroll} />
     {feature('MESSAGE_ACTIONS') && isFullscreenEnvEnabled() && !disableMessageActions ? <MessageActionsKeybindings handlers={messageActionHandlers} isActive={cursor !== null} /> : null}
     <CancelRequestHandler {...cancelRequestProps} />
     <MCPConnectionManager key={remountKey} dynamicMcpConfig={dynamicMcpConfig} isStrictMcpConfig={strictMcpConfig}>
-      <FullscreenLayout scrollRef={scrollRef} overlay={toolPermissionOverlay} bottomFloat={isBuddyEnabled() && companionVisible && !companionNarrow ? <CompanionFloatingBubble /> : undefined} modal={centeredModal} modalScrollRef={modalScrollRef} dividerYRef={dividerYRef} hidePill={!!viewedAgentTask} hideSticky={!!viewedTeammateTask} newMessageCount={unseenDivider?.count ?? 0} onPillClick={() => {
+       <FullscreenLayout scrollRef={scrollRef} overlay={permissionOverlay} bottomFloat={isBuddyEnabled() && companionVisible && !companionNarrow ? <CompanionFloatingBubble /> : undefined} modal={centeredModal} modalScrollRef={modalScrollRef} dividerYRef={dividerYRef} hidePill={!!viewedAgentTask} hideSticky={!!viewedTeammateTask} newMessageCount={unseenDivider?.count ?? 0} onPillClick={() => {
         setCursor(null);
         jumpToNew(scrollRef.current);
       }} scrollable={<>
         <TeammateViewHeader />
-        <Messages messages={displayedMessages} tools={tools} commands={renderCommands} verbose={verbose} toolJSX={toolJSX} toolUseConfirmQueue={toolUseConfirmQueue} inProgressToolUseIDs={viewedTeammateTask ? viewedTeammateTask.inProgressToolUseIDs ?? new Set() : inProgressToolUseIDs} isMessageSelectorVisible={isMessageSelectorVisible} conversationId={conversationId} screen={screen} streamingToolUses={streamingToolUses} showAllInTranscript={showAllInTranscript} agentDefinitions={agentDefinitions} onOpenRateLimitOptions={handleOpenRateLimitOptions} isLoading={isLoading} streamingText={isLoading && !viewedAgentTask ? visibleStreamingText : null} isBriefOnly={viewedAgentTask ? false : isBriefOnly} unseenDivider={viewedAgentTask ? undefined : unseenDivider} scrollRef={isFullscreenEnvEnabled() ? scrollRef : undefined} trackStickyPrompt={isFullscreenEnvEnabled() ? true : undefined} cursor={cursor} setCursor={setCursor} cursorNavRef={cursorNavRef} />
+         <SubagentEventStream events={subagentEvents} />
+         <Messages messages={displayedMessages} tools={tools} commands={renderCommands} verbose={verbose} toolJSX={toolJSX} toolUseConfirmQueue={toolUseConfirmQueue} inProgressToolUseIDs={viewedTeammateTask ? viewedTeammateTask.inProgressToolUseIDs ?? new Set() : inProgressToolUseIDs} isMessageSelectorVisible={isMessageSelectorVisible} conversationId={conversationId} screen={screen} streamingToolUses={streamingToolUses} showAllInTranscript={showAllInTranscript} agentDefinitions={agentDefinitions} onOpenRateLimitOptions={handleOpenRateLimitOptions} isLoading={isLoading} streamingText={isLoading && !viewedAgentTask ? visibleStreamingText : null} isBriefOnly={viewedAgentTask ? false : isBriefOnly} unseenDivider={viewedAgentTask ? undefined : unseenDivider} scrollRef={isFullscreenEnvEnabled() ? scrollRef : undefined} trackStickyPrompt={isFullscreenEnvEnabled() ? true : undefined} cursor={cursor} setCursor={setCursor} cursorNavRef={cursorNavRef} />
         <AwsAuthStatusBox />
         {/* Hide the processing placeholder while a modal is showing —
                   it would sit at the last visible transcript row right above

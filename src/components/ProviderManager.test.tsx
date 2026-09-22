@@ -164,14 +164,22 @@ function createDeferred<T>(): {
   return { promise, resolve }
 }
 
-function mockProviderProfilesModule(options?: {
+async function mockProviderProfilesModule(options?: {
   addProviderProfile?: (...args: unknown[]) => unknown
   getActiveProviderProfile?: () => unknown
   getProviderProfiles?: () => unknown[]
   updateProviderProfile?: (...args: unknown[]) => unknown
   setActiveProviderProfile?: (...args: unknown[]) => unknown
-}): void {
+}): Promise<void> {
+  // bun's mock.module() is sticky for the whole worker process. Spread the REAL
+  // module into this factory (via cache-busted dynamic import) so other suites
+  // sharing this worker keep working when their code resolves newer exports
+  // (e.g. findProviderProfileByIdOrName) against these mocked specifiers.
+  const actualProviderProfiles = await import(
+    `../utils/providerProfiles.ts?providerManagerActual=${Date.now()}-${Math.random()}`
+  )
   mock.module('../utils/providerProfiles.js', () => ({
+    ...actualProviderProfiles,
     addProviderProfile: options?.addProviderProfile ?? (() => null),
     applyActiveProviderProfileFromConfig: () => {},
     deleteProviderProfile: () => ({ removed: false, activeProfileId: null }),
@@ -269,7 +277,7 @@ function mockProviderProfilesModule(options?: {
   }))
 }
 
-function mockProviderManagerDependencies(
+async function mockProviderManagerDependencies(
   githubSyncRead: () => string | undefined,
   githubAsyncRead: () => Promise<string | undefined>,
   options?: {
@@ -321,8 +329,8 @@ function mockProviderManagerDependencies(
       message?: string
     }
   },
-): void {
-  mockProviderProfilesModule({
+): Promise<void> {
+  await mockProviderProfilesModule({
     addProviderProfile: options?.addProviderProfile,
     getActiveProviderProfile: options?.getActiveProviderProfile,
     getProviderProfiles: options?.getProviderProfiles,
@@ -543,7 +551,7 @@ test('ProviderManager resolves GitHub virtual provider from async storage withou
   })
   const asyncRead = mock(async () => 'stored-token')
 
-  mockProviderManagerDependencies(syncRead, asyncRead)
+  await mockProviderManagerDependencies(syncRead, asyncRead)
 
   const nonce = `${Date.now()}-${Math.random()}`
   const { ProviderManager } = await import(`./ProviderManager.js?ts=${nonce}`)
@@ -574,7 +582,7 @@ test('ProviderManager avoids first-frame false negative while stored-token looku
   const deferredStoredToken = createDeferred<string | undefined>()
   const asyncRead = mock(async () => deferredStoredToken.promise)
 
-  mockProviderManagerDependencies(syncRead, asyncRead)
+  await mockProviderManagerDependencies(syncRead, asyncRead)
 
   const nonce = `${Date.now()}-${Math.random()}`
   const { ProviderManager } = await import(`./ProviderManager.js?ts=${nonce}`)
@@ -605,7 +613,7 @@ test('ProviderManager avoids first-frame false negative while stored-token looku
 })
 
 test('ProviderManager shows API mode picker for custom OpenAI-compatible providers', async () => {
-  mockProviderManagerDependencies(() => undefined, async () => undefined)
+  await mockProviderManagerDependencies(() => undefined, async () => undefined)
 
   const nonce = `${Date.now()}-${Math.random()}`
   const { ProviderManager } = await import(`./ProviderManager.js?ts=${nonce}`)
@@ -648,7 +656,7 @@ test('ProviderManager shows API mode picker for custom OpenAI-compatible provide
 })
 
 test('ProviderManager keeps full setup flow for presets with placeholder endpoint defaults', async () => {
-  mockProviderManagerDependencies(() => undefined, async () => undefined)
+  await mockProviderManagerDependencies(() => undefined, async () => undefined)
 
   const nonce = `${Date.now()}-${Math.random()}`
   const { ProviderManager } = await import(`./ProviderManager.js?ts=${nonce}`)
@@ -690,7 +698,7 @@ test('ProviderManager asks for model and API key when adding OpenAI preset', asy
     ...payload,
   }))
 
-  mockProviderManagerDependencies(() => undefined, async () => undefined, {
+  await mockProviderManagerDependencies(() => undefined, async () => undefined, {
     addProviderProfile,
   })
 
@@ -758,7 +766,7 @@ test('ProviderManager saves OpenAI preset GPT-5 models with Responses API', asyn
     ...payload,
   }))
 
-  mockProviderManagerDependencies(() => undefined, async () => undefined, {
+  await mockProviderManagerDependencies(() => undefined, async () => undefined, {
     addProviderProfile,
   })
 
@@ -817,7 +825,7 @@ test('ProviderManager saves MiniMax preset with Anthropic-compatible endpoint an
     ...payload,
   }))
 
-  mockProviderManagerDependencies(() => undefined, async () => undefined, {
+  await mockProviderManagerDependencies(() => undefined, async () => undefined, {
     addProviderProfile,
   })
 
@@ -895,7 +903,7 @@ test('ProviderManager edit flow keeps MiniMax on Anthropic-compatible provider p
     ...payload,
   }))
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -972,7 +980,7 @@ test('ProviderManager saves Hicap preset non-GPT model with Chat Completions', a
     ...payload,
   }))
 
-  mockProviderManagerDependencies(() => undefined, async () => undefined, {
+  await mockProviderManagerDependencies(() => undefined, async () => undefined, {
     addProviderProfile,
   })
 
@@ -1042,7 +1050,7 @@ test('ProviderManager clears hidden Hicap auth fields when editing', async () =>
     ...payload,
   }))
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -1118,7 +1126,7 @@ test('ProviderManager skips advanced fields for legacy Kimi Code profiles', asyn
     apiKey: 'sk-test',
   }
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -1203,7 +1211,7 @@ test('ProviderManager first-run Ollama preset auto-detects installed models', as
     apiKey: payload.apiKey,
   }))
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -1277,7 +1285,7 @@ test('ProviderManager first-run Ollama preset auto-detects installed models', as
 test('ProviderManager preserves the Ollama readiness message when the probe is unreachable', async () => {
   const onDone = mock(() => {})
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
   )
@@ -1332,7 +1340,7 @@ test('ProviderManager first-run Atomic Chat preset auto-detects loaded models', 
     apiKey: payload.apiKey,
   }))
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -1429,7 +1437,7 @@ test('ProviderManager first-run Codex OAuth switches the current session after l
     apiKey: payload.apiKey,
   }))
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -1533,7 +1541,7 @@ test('ProviderManager first-run Codex OAuth surfaces credential storage warnings
     apiKey: payload.apiKey,
   }))
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -1623,7 +1631,7 @@ test('ProviderManager first-run Codex OAuth reports next-startup fallback when s
     apiKey: payload.apiKey,
   }))
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -1722,7 +1730,7 @@ test('ProviderManager does not hijack a manual Codex profile when OAuth credenti
     apiKey: '',
   }))
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -1803,7 +1811,7 @@ test('ProviderManager keeps Codex OAuth as next-startup only when activating the
   )
   const setActiveProviderProfile = mock(() => codexProfile)
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -1877,7 +1885,7 @@ test('ProviderManager activating a multi-model provider sets the session model t
   const setActiveProviderProfile = mock(() => multiModelProfile)
   const appStateChanges: Array<{ newState: any; oldState: any }> = []
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -1959,7 +1967,7 @@ test('ProviderManager editing an active multi-model provider keeps app state on 
   const updateProviderProfile = mock(() => multiModelProfile)
   const appStateChanges: Array<{ newState: any; oldState: any }> = []
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -2097,7 +2105,7 @@ test('ProviderManager set-active list uses descriptor-backed provider type label
     apiKey: 'gm-test',
   }
 
-  mockProviderManagerDependencies(
+  await mockProviderManagerDependencies(
     () => undefined,
     async () => undefined,
     {
@@ -2151,7 +2159,7 @@ test('ProviderManager resolves Codex OAuth state from async storage without sync
     refreshToken: 'codex-refresh-token',
   }))
 
-  mockProviderManagerDependencies(githubSyncRead, githubAsyncRead, {
+  await mockProviderManagerDependencies(githubSyncRead, githubAsyncRead, {
     codexSyncRead,
     codexAsyncRead,
   })
@@ -2179,7 +2187,7 @@ test('ProviderManager hides Codex OAuth setup in bare mode', async () => {
   const githubSyncRead = mock(() => undefined)
   const githubAsyncRead = mock(async () => undefined)
 
-  mockProviderManagerDependencies(githubSyncRead, githubAsyncRead)
+  await mockProviderManagerDependencies(githubSyncRead, githubAsyncRead)
 
   const nonce = `${Date.now()}-${Math.random()}`
   const { ProviderManager } = await import(`./ProviderManager.js?ts=${nonce}`)

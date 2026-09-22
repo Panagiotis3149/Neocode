@@ -149,21 +149,25 @@ describe('isAutoNewSeededReadPath', () => {
     expect(isAutoNewSeededReadPath(`${cwd}/.claude/settings.json`, cwd)).toBe(true)
   })
 
-  test('does NOT blanket-allow sibling or arbitrary paths', () => {
-    expect(isAutoNewSeededReadPath(`${cwd}/src/index.ts`, cwd)).toBe(false)
-    expect(isAutoNewSeededReadPath(`${cwd}/.env`, cwd)).toBe(false)
+  test('allows workspace paths (project files are seeded in autoNew)', () => {
+    expect(isAutoNewSeededReadPath(`${cwd}/src/index.ts`, cwd)).toBe(true)
+    expect(isAutoNewSeededReadPath(`${cwd}/.env`, cwd)).toBe(true)
+    expect(isAutoNewSeededReadPath(`${cwd}/package.json`, cwd)).toBe(true)
+    expect(isAutoNewSeededReadPath(`${cwd}/deeply/nested/file.ts`, cwd)).toBe(true)
+  })
+
+  test('blocks paths outside the workspace', () => {
     expect(isAutoNewSeededReadPath(`/home/user/.ssh/id_rsa`, cwd)).toBe(false)
     expect(isAutoNewSeededReadPath(`/usr/bin/bash`, cwd)).toBe(false)
     expect(isAutoNewSeededReadPath(`C:\\Windows\\System32`, cwd)).toBe(false)
-    // A temp dir NOT under the cwd must NOT be seeded.
     expect(isAutoNewSeededReadPath(`/other/temp`, cwd)).toBe(false)
   })
 
-  test('windows separators work', () => {
+  test('allows workspace paths with windows separators', () => {
     const wCwd = 'C:\\Users\\user\\project'
     expect(isAutoNewSeededReadPath(`${wCwd}\\temp`, wCwd)).toBe(true)
     expect(isAutoNewSeededReadPath(`${wCwd}\\.claude\\x`, wCwd)).toBe(true)
-    expect(isAutoNewSeededReadPath(`${wCwd}\\src\\x`, wCwd)).toBe(false)
+    expect(isAutoNewSeededReadPath(`${wCwd}\\src\\x`, wCwd)).toBe(true)
   })
 
   test('allows the OS / AppData temp directory and its descendants', () => {

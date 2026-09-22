@@ -11,6 +11,15 @@ const teamMemPaths = feature('TEAMMEM')
 import { getKairosActive, getOriginalCwd } from '../bootstrap/state.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
 /* eslint-enable @typescript-eslint/no-require-imports */
+import type {
+  PromptFence,
+  PromptRequest,
+  PromptSnapshot,
+  PromptSnapshotRecord,
+  SynchronousTransportQueue,
+  TransportOwnershipReceipt,
+} from '../services/memoryV2/promptFence.js'
+import { randomUUID } from 'node:crypto'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -23,6 +32,12 @@ import { isEnvTruthy } from '../utils/envUtils.js'
 import { formatFileSize } from '../utils/format.js'
 import { getProjectDir } from '../utils/sessionStorage.js'
 import { getInitialSettings } from '../utils/settings/settings.js'
+import {
+  configureSystemPromptMetadataResolver,
+  getSystemPromptMetadata,
+  setSystemPromptMetadata,
+  type SystemPrompt,
+} from '../utils/systemPromptType.js'
 import {
   MEMORY_FRONTMATTER_EXAMPLE,
   TRUSTING_RECALL_SECTION,
@@ -37,6 +52,276 @@ export const MAX_ENTRYPOINT_LINES = 200
 // slip past the line cap (p100 observed: 197KB under 200 lines).
 export const MAX_ENTRYPOINT_BYTES = 25_000
 const AUTO_MEM_DISPLAY_NAME = 'auto memory'
+
+export const MEMORY_ONLY_FORGET_MESSAGE =
+  'Forgotten from durable memory. This does not remove the information from the current conversation or saved session history. Delete or reset the session to remove its history.'
+
+export const SESSION_HISTORY_DELETE_COMMANDS =
+  '/session delete-history or /session reset --delete-history'
+
+export function buildMemoryForgetGuidance(): string[] {
+  return [
+    '## Forgetting memory',
+    '',
+    MEMORY_ONLY_FORGET_MESSAGE,
+    '',
+    `Use ${SESSION_HISTORY_DELETE_COMMANDS} for explicit session-history removal.`,
+  ]
+}
+
+export function createMemoryPromptSnapshot(input: {
+  fence: PromptFence
+  projectScopeId: string
+  storeGeneration: bigint
+  promptEpoch: bigint
+  records: readonly PromptSnapshotRecord[]
+  maxPromptCharacters: number
+  maxPromptTokens: number
+}): PromptSnapshot {
+  return input.fence.createSnapshot({
+    projectScopeId: input.projectScopeId,
+    storeGeneration: input.storeGeneration,
+    promptEpoch: input.promptEpoch,
+    records: input.records,
+    maxPromptCharacters: input.maxPromptCharacters,
+    maxPromptTokens: input.maxPromptTokens,
+  })
+}
+
+export type MemoryPromptV2Binding = Readonly<{
+  fence: PromptFence
+  projectScopeId: string
+  storeGeneration: bigint
+  promptEpoch: bigint
+  records: readonly PromptSnapshotRecord[]
+  maxPromptCharacters: number
+  maxPromptTokens: number
+}>
+
+export type MemoryPromptV2BindingProvider = (input: {
+  displayName: string
+  memoryDir: string
+}) => MemoryPromptV2Binding | null
+
+let memoryPromptV2BindingProvider: MemoryPromptV2BindingProvider | null = null
+let memoryPromptV2Transport: SynchronousTransportQueue | null = null
+type RegisteredMemoryPrompt = { binding: MemoryPromptV2Binding; snapshot: PromptSnapshot; text: string }
+const registeredMemoryPromptSnapshots = new Map<string, RegisteredMemoryPrompt[]>()
+const registeredMemoryPromptSystemPrompts = new WeakMap<readonly string[], RegisteredMemoryPrompt>()
+const invalidatedMemoryPromptRegistrations = new WeakSet<RegisteredMemoryPrompt>()
+const registeredMemoryPromptSystemPromptKeys = new Set<readonly string[]>()
+const registrationOrder: RegisteredMemoryPrompt[] = []
+const MAX_REGISTERED_MEMORY_PROMPT_ENTRIES = 128
+const MAX_REGISTERED_MEMORY_PROMPT_BYTES = 2_000_000
+let registeredMemoryPromptBytes = 0
+
+configureSystemPromptMetadataResolver(value => registeredMemoryPromptSystemPrompts.get(value))
+
+function clearRegisteredMemoryPromptSnapshots(): void {
+  for (const registration of registrationOrder) invalidatedMemoryPromptRegistrations.add(registration)
+  for (const key of registeredMemoryPromptSystemPromptKeys) {
+    registeredMemoryPromptSystemPrompts.delete(key)
+    setSystemPromptMetadata(key, undefined)
+  }
+  registeredMemoryPromptSystemPromptKeys.clear()
+  registrationOrder.length = 0
+  registeredMemoryPromptBytes = 0
+  registeredMemoryPromptSnapshots.clear()
+}
+
+function registrationBytes(text: string): number {
+  return new TextEncoder().encode(text).byteLength
+}
+
+function removeRegistration(registration: RegisteredMemoryPrompt): void {
+  invalidatedMemoryPromptRegistrations.add(registration)
+  const registrations = registeredMemoryPromptSnapshots.get(registration.text)
+  if (registrations) {
+    const index = registrations.indexOf(registration)
+    if (index >= 0) registrations.splice(index, 1)
+    if (registrations.length === 0) registeredMemoryPromptSnapshots.delete(registration.text)
+  }
+  const orderIndex = registrationOrder.indexOf(registration)
+  if (orderIndex >= 0) registrationOrder.splice(orderIndex, 1)
+  registeredMemoryPromptBytes -= registrationBytes(registration.text)
+  for (const key of registeredMemoryPromptSystemPromptKeys) {
+    if (getSystemPromptMetadata(key) === registration) {
+      registeredMemoryPromptSystemPrompts.delete(key)
+      setSystemPromptMetadata(key, undefined)
+      registeredMemoryPromptSystemPromptKeys.delete(key)
+    }
+  }
+}
+
+function enforceRegistrationBounds(): void {
+  while (
+    registrationOrder.length > MAX_REGISTERED_MEMORY_PROMPT_ENTRIES ||
+    registeredMemoryPromptBytes > MAX_REGISTERED_MEMORY_PROMPT_BYTES
+  ) {
+    const oldest = registrationOrder[0]
+    if (!oldest) return
+    removeRegistration(oldest)
+  }
+}
+
+export function configureMemoryPromptV2BindingProvider(
+  provider: MemoryPromptV2BindingProvider | null,
+): void {
+  memoryPromptV2BindingProvider = provider
+  if (!provider) clearRegisteredMemoryPromptSnapshots()
+}
+
+export function configureMemoryPromptV2Transport(
+  transport: SynchronousTransportQueue | null,
+): void {
+  memoryPromptV2Transport = transport
+  if (!transport) clearRegisteredMemoryPromptSnapshots()
+}
+
+export function getMemoryPromptV2TransportQueue(): MemoryPromptTransportQueue | null {
+  const transport = memoryPromptV2Transport
+  if (
+    !transport ||
+    typeof (transport as MemoryPromptTransportQueue).consume !== 'function' ||
+    typeof (transport as MemoryPromptTransportQueue).release !== 'function' ||
+    typeof (transport as MemoryPromptTransportQueue).close !== 'function'
+  ) {
+    return null
+  }
+  return transport as MemoryPromptTransportQueue
+}
+
+export type MemoryPromptTransportQueue = SynchronousTransportQueue & Readonly<{
+  consume(receipt: TransportOwnershipReceipt): unknown
+  release(receipt: TransportOwnershipReceipt): void
+  close(): void
+  pendingCount(): number
+}>
+
+export function createMemoryPromptTransportQueue(): MemoryPromptTransportQueue {
+  const owned = new Map<string, TransportOwnershipReceipt>()
+  const maxEntries = 32
+  const maxBytes = 256_000
+  let bytes = 0
+  let closed = false
+  const sizeOf = (payload: unknown): number => {
+    if (typeof payload === 'string') return new TextEncoder().encode(payload).byteLength
+    try {
+      const serialized = JSON.stringify(payload)
+      if (serialized === undefined) return Number.POSITIVE_INFINITY
+      return new TextEncoder().encode(serialized).byteLength
+    } catch {
+      return Number.POSITIVE_INFINITY
+    }
+  }
+  const requireOwned = (receipt: TransportOwnershipReceipt): TransportOwnershipReceipt => {
+    if (
+      !receipt ||
+      typeof receipt !== 'object' ||
+      receipt.accepted !== true ||
+      typeof receipt.requestId !== 'string' ||
+      !receipt.requestId
+    ) {
+      throw new Error('Memory V2 transport receipt is malformed')
+    }
+    const ownedReceipt = owned.get(receipt.requestId)
+    if (
+      !ownedReceipt ||
+      ownedReceipt !== receipt ||
+      ownedReceipt.payload !== receipt.payload
+    ) {
+      throw new Error('Memory V2 transport receipt is not owned by this queue')
+    }
+    return ownedReceipt
+  }
+  const removeOwned = (receipt: TransportOwnershipReceipt): TransportOwnershipReceipt => {
+    const ownedReceipt = requireOwned(receipt)
+    owned.delete(ownedReceipt.requestId)
+    bytes -= sizeOf(ownedReceipt.payload)
+    return ownedReceipt
+  }
+  const queue = {
+    enqueue(payload: unknown, requestId: string): TransportOwnershipReceipt | null {
+      if (closed || !requestId || owned.has(requestId) || owned.size >= maxEntries) return null
+      if (payload && typeof payload === 'object' && !Object.isFrozen(payload)) return null
+      const payloadBytes = sizeOf(payload)
+      if (!Number.isFinite(payloadBytes) || bytes + payloadBytes > maxBytes) return null
+      const receipt = Object.freeze({ accepted: true as const, requestId, payload })
+      owned.set(requestId, receipt)
+      bytes += payloadBytes
+      return receipt
+    },
+    consume(receipt: TransportOwnershipReceipt): unknown {
+      return removeOwned(receipt).payload
+    },
+    release(receipt: TransportOwnershipReceipt): void {
+      removeOwned(receipt)
+    },
+    close(): void {
+      if (owned.size > 0) throw new Error('Memory V2 transport queue still owns committed payloads')
+      closed = true
+    },
+    pendingCount(): number {
+      return owned.size
+    },
+  }
+  return Object.freeze(queue)
+}
+
+export function registerMemoryPromptSnapshot(input: {
+  binding: MemoryPromptV2Binding
+  snapshot: PromptSnapshot
+  text: string
+}): string {
+  if (input.snapshot.projectScopeId !== input.binding.projectScopeId) throw new Error('Memory V2 prompt snapshot scope is invalid')
+  const current = registeredMemoryPromptSnapshots.get(input.text) ?? []
+  const registration = Object.freeze({ binding: input.binding, snapshot: input.snapshot, text: input.text })
+  current.push(registration)
+  registeredMemoryPromptSnapshots.set(input.text, current)
+  registrationOrder.push(registration)
+  registeredMemoryPromptBytes += registrationBytes(input.text)
+  enforceRegistrationBounds()
+  return input.text
+}
+
+export function registerMemoryPromptSystemPrompt(systemPrompt: string[]): string[]
+export function registerMemoryPromptSystemPrompt(systemPrompt: readonly string[]): SystemPrompt
+export function registerMemoryPromptSystemPrompt(
+  systemPrompt: readonly string[],
+): string[] | SystemPrompt {
+  const registered = [...registeredMemoryPromptSnapshots.values()]
+    .flat()
+    .filter(candidate => !invalidatedMemoryPromptRegistrations.has(candidate))
+    .filter(candidate => systemPrompt.some(section => section === candidate.text))
+    .at(-1)
+  if (registered) {
+    registeredMemoryPromptSystemPrompts.set(systemPrompt, registered)
+    registeredMemoryPromptSystemPromptKeys.add(systemPrompt)
+    return setSystemPromptMetadata(systemPrompt, registered) as string[] | SystemPrompt
+  }
+  return systemPrompt as SystemPrompt
+}
+
+export function hasRegisteredMemoryPrompt(systemPrompt: readonly string[]): boolean {
+  const registered = getSystemPromptMetadata(systemPrompt) as RegisteredMemoryPrompt | undefined
+  return registered !== undefined && !invalidatedMemoryPromptRegistrations.has(registered)
+}
+
+export function invalidateMemoryPromptRegistrations(
+  recordId: string,
+  projectScopeId: string,
+): void {
+  for (const registration of [...registrationOrder]) {
+    if (registration.snapshot.projectScopeId !== projectScopeId) continue
+    if (registration.snapshot.records.some(record => record.id === recordId && record.projectScopeId === projectScopeId)) {
+      removeRegistration(registration)
+    }
+  }
+}
+
+export function invalidateAllMemoryPromptRegistrations(): void {
+  clearRegisteredMemoryPromptSnapshots()
+}
 
 export type EntrypointTruncation = {
   content: string
@@ -244,6 +529,7 @@ export function buildMemoryLines(
     '',
     ...TYPES_SECTION_INDIVIDUAL,
     ...WHAT_NOT_TO_SAVE_SECTION,
+    ...buildMemoryForgetGuidance(),
     '',
     ...howToSave,
     '',
@@ -273,21 +559,34 @@ export function buildMemoryPrompt(params: {
   displayName: string
   memoryDir: string
   extraGuidelines?: string[]
+  v2?: MemoryPromptV2Binding
+  v2Snapshot?: PromptSnapshot
 }): string {
   const { displayName, memoryDir, extraGuidelines } = params
   const fs = getFsImplementation()
   const entrypoint = memoryDir + ENTRYPOINT_NAME
+  const binding = params.v2 ?? memoryPromptV2BindingProvider?.({ displayName, memoryDir }) ?? null
+  if (binding && !params.v2Snapshot) throw new Error('Memory V2 prompts must use a committed transport envelope')
+  const snapshot = params.v2Snapshot ?? (binding ? createMemoryPromptSnapshot(binding) : null)
 
   // Directory creation is the caller's responsibility (loadMemoryPrompt /
   // loadAgentMemoryPrompt). Builders only read, they don't mkdir.
 
   // Read existing memory entrypoint (sync: prompt building is synchronous)
   let entrypointContent = ''
-  try {
-    // eslint-disable-next-line custom-rules/no-sync-fs
-    entrypointContent = fs.readFileSync(entrypoint, { encoding: 'utf-8' })
-  } catch {
-    // No memory file yet
+  if (snapshot) {
+    const entrypointRecord = snapshot.records.find(record => record.id === ENTRYPOINT_NAME)
+    if (!entrypointRecord || typeof entrypointRecord.content !== 'string') {
+      throw new Error('Memory V2 snapshot is missing the frozen MEMORY.md entrypoint')
+    }
+    entrypointContent = entrypointRecord.content
+  } else {
+    try {
+      // eslint-disable-next-line custom-rules/no-sync-fs
+      entrypointContent = fs.readFileSync(entrypoint, { encoding: 'utf-8' })
+    } catch {
+      // No memory file yet
+    }
   }
 
   const lines = buildMemoryLines(displayName, memoryDir, extraGuidelines)
@@ -313,6 +612,109 @@ export function buildMemoryPrompt(params: {
   }
 
   return lines.join('\n')
+}
+
+export type FencedMemoryPromptEnvelope = Readonly<{
+  text: string
+  fence: PromptFence
+  snapshot: PromptSnapshot
+  request: PromptRequest
+  receipt: TransportOwnershipReceipt
+}>
+
+export type MemoryPromptTransport = Readonly<{
+  enqueue(payload: unknown, requestId: string): TransportOwnershipReceipt | null
+}>
+
+export function buildMemoryPromptForTransport(input: {
+  displayName: string
+  memoryDir: string
+  extraGuidelines?: string[]
+  v2?: MemoryPromptV2Binding
+  transport: SynchronousTransportQueue
+}): FencedMemoryPromptEnvelope {
+  const binding = input.v2 ?? memoryPromptV2BindingProvider?.({ displayName: input.displayName, memoryDir: input.memoryDir }) ?? null
+  if (!binding) throw new Error('Memory V2 prompt binding is unavailable')
+  const snapshot = createMemoryPromptSnapshot(binding)
+  const text = buildMemoryPrompt({ ...input, v2: binding, v2Snapshot: snapshot })
+  const requestId = `memory-prompt:${randomUUID()}`
+  binding.fence.begin({
+    requestId,
+    payload: text,
+    snapshot,
+    memoryRecordIds: binding.records.map(record => record.id),
+    budget: {
+      characters: Array.from(text).length,
+      tokens: Math.ceil(Array.from(text).length / 4),
+    },
+  })
+  binding.fence.waitForLease(requestId)
+  const lease = binding.fence.acquireLease()
+  try {
+    binding.fence.admit(requestId, lease)
+    const receipt = binding.fence.commitSend(requestId, lease, input.transport)
+    if (!receipt) throw new Error('Memory V2 transport queue rejected the prompt')
+    const request = binding.fence.getRequest(requestId)
+    binding.fence.releaseLease(lease)
+    return Object.freeze({ text, fence: binding.fence, snapshot, request, receipt })
+  } catch (error) {
+    if (binding.fence.getRequest(requestId).state !== 'SEND_COMMITTED') {
+      try { binding.fence.releaseLease(lease) } catch {}
+    }
+    throw error
+  }
+}
+
+export function commitRegisteredMemoryPrompt(
+  systemPrompt: readonly string[],
+  transport?: SynchronousTransportQueue,
+): FencedMemoryPromptEnvelope {
+  if (!memoryPromptV2Transport) throw new Error('Memory V2 prompt transport binding is unavailable')
+  const registered = getSystemPromptMetadata(systemPrompt) as RegisteredMemoryPrompt | undefined
+  if (!registered || invalidatedMemoryPromptRegistrations.has(registered)) throw new Error('Memory V2 prompt snapshot is unavailable')
+  const requestId = `memory-prompt:${randomUUID()}`
+  registered.binding.fence.begin({
+    requestId,
+    payload: registered.text,
+    snapshot: registered.snapshot,
+    memoryRecordIds: registered.binding.records.map(record => record.id),
+    budget: {
+      characters: Array.from(registered.text).length,
+      tokens: Math.ceil(Array.from(registered.text).length / 4),
+    },
+  })
+  registered.binding.fence.waitForLease(requestId)
+  const lease = registered.binding.fence.acquireLease()
+  try {
+    registered.binding.fence.admit(requestId, lease)
+    const receipt = registered.binding.fence.commitSend(requestId, lease, transport ?? memoryPromptV2Transport)
+    if (!receipt) throw new Error('Memory V2 prompt transport queue rejected the prompt')
+    const request = registered.binding.fence.getRequest(requestId)
+    registered.binding.fence.releaseLease(lease)
+    return Object.freeze({ text: registered.text, fence: registered.binding.fence, snapshot: registered.snapshot, request, receipt })
+  } catch (error) {
+    try {
+      if (registered.binding.fence.getRequest(requestId).state !== 'SEND_COMMITTED') registered.binding.fence.releaseLease(lease)
+    } catch {}
+    throw error
+  }
+}
+
+export async function loadMemoryPromptForTransport(input: {
+  transport: MemoryPromptTransport
+  extraGuidelines?: string[]
+}): Promise<FencedMemoryPromptEnvelope | null> {
+  if (!isAutoMemoryEnabled()) return null
+  const memoryDir = getAutoMemPath()
+  if (feature('TEAMMEM') && teamMemPaths!.isTeamMemoryEnabled()) throw new Error('Memory V2 transport does not support combined team memory prompts')
+  if (feature('KAIROS') && getKairosActive()) throw new Error('Memory V2 transport does not support daily-log prompts')
+  await ensureMemoryDirExists(memoryDir)
+  return buildMemoryPromptForTransport({
+    displayName: AUTO_MEM_DISPLAY_NAME,
+    memoryDir,
+    extraGuidelines: input.extraGuidelines,
+    transport: input.transport,
+  })
 }
 
 /**
@@ -418,6 +820,28 @@ export function buildSearchingPastContextSection(autoMemDir: string): string[] {
  */
 export async function loadMemoryPrompt(): Promise<string | null> {
   const autoEnabled = isAutoMemoryEnabled()
+
+  const memoryV2Binding = autoEnabled
+    ? memoryPromptV2BindingProvider?.({ displayName: AUTO_MEM_DISPLAY_NAME, memoryDir: getAutoMemPath() }) ?? null
+    : null
+  if (memoryV2Binding) {
+    if (!memoryPromptV2Transport) throw new Error('Memory V2 prompt transport binding is unavailable')
+    if (feature('TEAMMEM') && teamMemPaths!.isTeamMemoryEnabled()) throw new Error('Memory V2 transport does not support combined team memory prompts')
+    if (feature('KAIROS') && getKairosActive()) throw new Error('Memory V2 transport does not support daily-log prompts')
+    const memoryDir = getAutoMemPath()
+    await ensureMemoryDirExists(memoryDir)
+    const snapshot = createMemoryPromptSnapshot({
+      fence: memoryV2Binding.fence,
+      projectScopeId: memoryV2Binding.projectScopeId,
+      storeGeneration: memoryV2Binding.storeGeneration,
+      promptEpoch: memoryV2Binding.promptEpoch,
+      records: memoryV2Binding.records,
+      maxPromptCharacters: memoryV2Binding.maxPromptCharacters,
+      maxPromptTokens: memoryV2Binding.maxPromptTokens,
+    })
+    const text = buildMemoryPrompt({ displayName: AUTO_MEM_DISPLAY_NAME, memoryDir, v2: memoryV2Binding, v2Snapshot: snapshot })
+    return registerMemoryPromptSnapshot({ binding: memoryV2Binding, snapshot, text })
+  }
 
   const skipIndex = getFeatureValue_CACHED_MAY_BE_STALE(
     'tengu_moth_copse',

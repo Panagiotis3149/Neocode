@@ -32,7 +32,7 @@ import {
   isFastModeEnabled,
   triggerFastModeCooldown,
 } from '../../utils/fastMode.js'
-import { consumePendingRotation, getActiveApiKey, getProviderByApiKey, notifyRateLimitError } from './backupTokenManager.js'
+import { consumePendingRotation, getActiveApiKey, getProviderByApiKey, notifyRateLimitError, isNvidiaNimRoute } from './backupTokenManager.js'
 import { getActiveProviderProfile } from '../../utils/providerProfiles.js'
 import { isNonCustomOpusModel } from '../../utils/model/model.js'
 import { disableKeepAlive } from '../../utils/proxy.js'
@@ -59,6 +59,10 @@ const MAX_529_RETRIES = 3
 export const DEFAULT_RETRY_DELAY_MS = 500
 export const BASE_DELAY_MS = DEFAULT_RETRY_DELAY_MS
 const MAX_RETRY_DELAY_BASE_MS = 60_000
+
+// NVIDIA NIM special constants
+const NVIDIA_NIM_429_WAIT_MS = 5 * 60 * 1000 // 5 minutes
+const NVIDIA_NIM_429_MAX_RETRIES_MULTIPLIER = 3 // 3x retries for NVIDIA NIM 429
 
 // Foreground query sources where the user IS blocking on the result — these
 // retry on 529. Everything else (summaries, titles, suggestions, classifiers)
@@ -118,6 +122,14 @@ function isQuotaExhausted(error: any): boolean {
   )
 }
 
+function isNimQuotaExhausted(error: APIError): boolean {
+  const msg = error.message.toLowerCase()
+  return (
+    error.status === 429 &&
+    (msg.includes('quota exhausted') || msg.includes('quota exceeded') || msg.includes('rate limit'))
+  )
+}
+
 function isTransientCapacityError(error: unknown): boolean {
   return (
     is529Error(error) || (error instanceof APIError && error.status === 429)
@@ -154,6 +166,12 @@ interface RetryOptions {
    * regardless of which request mode hit the overload.
    */
   initialConsecutive529Errors?: number
+  /**
+   * Goal mode: 3x more retries and special NVIDIA NIM 429 handling.
+   * When true, maxRetries is multiplied by 3 and NVIDIA NIM quota exhausted
+   * triggers 5 minute wait or model fallback.
+   */
+  goalMode?: boolean
 }
 
 export class CannotRetryError extends Error {
@@ -291,13 +309,16 @@ export async function* withRetry<T>(
             retryContext,
           );
       }
+      // Resolve the current provider name once per attempt so both the
+      // backup-token rotation block below and the NVIDIA NIM 429 handler
+      // (further down) can reference it without redeclaring.
+      const currentProvider = getActiveProviderProfile()?.id ?? getAPIProvider()
+      const currentKey = getActiveApiKey(currentProvider)
+      const providerName = getProviderByApiKey(currentKey) ?? currentProvider
       // Backup token rotation: register the 429 with the backup token manager.
       // If the configured error threshold is crossed, the manager rotates to the
       // next configured key and we force a fresh client so the new key is used.
       if (error instanceof APIError && error.status === 429) {
-        const currentProvider = getActiveProviderProfile()?.id ?? getAPIProvider()
-        const currentKey = getActiveApiKey(currentProvider)
-        const providerName = getProviderByApiKey(currentKey) ?? currentProvider
         notifyRateLimitError(error, providerName)
       }
 
@@ -354,6 +375,44 @@ export async function* withRetry<T>(
         handleFastModeRejectedByAPI()
         retryContext.fastMode = false
         continue
+      }
+
+      // NVIDIA NIM special handling: 429 with "Too many requests" or "quota exhausted"
+      // NVIDIA NIM returns 429 with message "Too many requests" or similar when rate limited
+      // Handle with 3x retries and model fallback chain (current → default → backup → previous)
+      // In goal mode: 3x the base retries (so 9x total for NVIDIA NIM 429)
+      if (
+        error instanceof APIError &&
+        error.status === 429 &&
+        isNvidiaNimRoute(providerName)
+      ) {
+        const isQuotaExhausted = isNimQuotaExhausted(error)
+        const baseNvidiaNimRetries = maxRetries * 3 // 3x retries for NVIDIA NIM 429
+        const goalModeMultiplier = options.goalMode ? 3 : 1
+        const nvidiaNimMaxRetries = baseNvidiaNimRetries * goalModeMultiplier
+
+        if (attempt <= nvidiaNimMaxRetries) {
+          // For quota exhausted, use longer wait time (5 minutes)
+          const waitTime = isQuotaExhausted
+            ? NVIDIA_NIM_429_WAIT_MS
+            : getRetryAfterMs(error) ?? NVIDIA_NIM_429_WAIT_MS
+
+          // Wait before retry
+          await sleep(waitTime, options.signal, { abortError })
+
+          // Try model fallback on later attempts
+          if (attempt >= nvidiaNimMaxRetries - 2 && options.fallbackModel) {
+            logEvent('tengu_nvidia_nim_model_fallback', {
+              original_model: options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+              fallback_model: options.fallbackModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+              attempt,
+              quota_exhausted: isQuotaExhausted,
+              goal_mode: options.goalMode ?? false,
+            })
+            throw new FallbackTriggeredError(options.model, options.fallbackModel)
+          }
+          continue
+        }
       }
 
       // Non-foreground sources bail immediately on 529 — no retry amplification
@@ -928,7 +987,12 @@ export function getDefaultRetryDelayMs(): number {
   ).effective
 }
 function getMaxRetries(options: RetryOptions): number {
-  return options.maxRetries ?? getDefaultMaxRetries()
+  const baseRetries = options.maxRetries ?? getDefaultMaxRetries()
+  // Goal mode: 3x more retries
+  if (options.goalMode) {
+    return baseRetries * 3
+  }
+  return baseRetries
 }
 
 function validateRetryAttemptsEnvVar(

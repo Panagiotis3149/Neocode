@@ -8,6 +8,7 @@ import { useKeybinding } from '../../keybindings/useKeybinding.js';
 import { useAppState } from '../../state/AppState.js';
 import type { LocalJSXCommandCall } from '../../types/command.js';
 import { logForDebugging } from '../../utils/debug.js';
+import { executeSessionHistoryCommand, isSessionHistoryCommand } from '../../services/memoryV2/commandHandlers.js';
 type Props = {
   onDone: () => void;
 };
@@ -134,6 +135,14 @@ function _temp2(e) {
 function _temp(s) {
   return s.remoteSessionUrl;
 }
-export const call: LocalJSXCommandCall = async onDone => {
+export const call: LocalJSXCommandCall = async (onDone, _context, args = '') => {
+  if (isSessionHistoryCommand(args)) {
+    try {
+      onDone(await executeSessionHistoryCommand(args), { display: 'system' });
+    } catch (error) {
+      onDone(`Error deleting session history: ${error instanceof Error ? error.message : String(error)}`, { display: 'system' });
+    }
+    return null;
+  }
   return <SessionInfo onDone={onDone} />;
 };

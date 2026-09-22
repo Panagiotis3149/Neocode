@@ -319,6 +319,24 @@ export function hasProviderProfiles(config = getGlobalConfig()): boolean {
   return getProviderProfiles(config).length > 0
 }
 
+/**
+ * Resolve a provider profile by its id or display name (case-insensitive,
+ * trimmed). Id matches take precedence over name matches. Returns undefined
+ * for blank/unknown selectors.
+ */
+export function findProviderProfileByIdOrName(
+  selector: string | undefined,
+  config = getGlobalConfig(),
+): ProviderProfile | undefined {
+  const needle = selector?.trim().toLowerCase()
+  if (!needle) return undefined
+  const profiles = getProviderProfiles(config)
+  return (
+    profiles.find(p => p.id?.toLowerCase() === needle) ??
+    profiles.find(p => p.name?.trim().toLowerCase() === needle)
+  )
+}
+
 function hasProviderSelectionFlags(
   processEnv: NodeJS.ProcessEnv = process.env,
 ): boolean {

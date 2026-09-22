@@ -4,6 +4,7 @@ export const RARITIES = [
   'rare',
   'epic',
   'legendary',
+  'custom',
 ] as const
 export type Rarity = (typeof RARITIES)[number]
 
@@ -50,7 +51,6 @@ export const mushroom = c(
   0x6d,
 ) as 'mushroom'
 export const chonk = c(0x63, 0x68, 0x6f, 0x6e, 0x6b) as 'chonk'
-
 export const SPECIES = [
   duck,
   goose,
@@ -129,6 +129,7 @@ export const RARITY_WEIGHTS = {
   rare: 10,
   epic: 4,
   legendary: 1,
+  custom: 0,
 } as const satisfies Record<Rarity, number>
 
 export const RARITY_STARS = {
@@ -137,6 +138,7 @@ export const RARITY_STARS = {
   rare: '★★★',
   epic: '★★★★',
   legendary: '★★★★★',
+  custom: '✦',
 } as const satisfies Record<Rarity, string>
 
 export const RARITY_COLORS = {
@@ -145,4 +147,5 @@ export const RARITY_COLORS = {
   rare: 'permission',
   epic: 'autoAccept',
   legendary: 'warning',
+  custom: 'remember',
 } as const satisfies Record<Rarity, keyof import('../utils/theme.js').Theme>

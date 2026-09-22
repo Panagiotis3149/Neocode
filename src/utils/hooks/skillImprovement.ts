@@ -1,4 +1,5 @@
 import { feature } from 'bun:bundle'
+import { randomUUID } from 'node:crypto'
 import { getInvokedSkillsForAgent } from '../../bootstrap/state.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import {
@@ -22,6 +23,16 @@ import {
 import { getSmallFastModel } from '../model/model.js'
 import { jsonParse } from '../slowOperations.js'
 import { asSystemPrompt } from '../systemPromptType.js'
+import {
+  GeneratedSkillNotFoundError,
+  GeneratedSkillStore,
+  isVerifiedGeneratedSkillMutationCapability,
+  resolveGeneratedSkillStoreOptions,
+  type GeneratedSkillStoreOptions,
+} from '../../services/generatedSkills/store.js'
+import { isFeatureGateEnabled, type FeatureGateRequest } from '../../services/memoryV2/featureGates.js'
+import { REVIEWER_PLACEHOLDER_INSTRUCTIONS, sanitizeReviewerPayload, validateReviewerOutput } from '../../services/memoryV2/reviewer.js'
+import { getMemoryV2SkillRuntimeConfig } from '../../services/memoryV2/skillRuntimeConfig.js'
 import {
   type ApiQueryHookConfig,
   createApiQueryHook,
@@ -173,6 +184,10 @@ Output <updates>[]</updates> if no updates are needed.`,
 }
 
 export function initSkillImprovement(): void {
+  const runtimeConfig = getMemoryV2SkillRuntimeConfig()
+  if (runtimeConfig.gateResolution?.AUTO_SKILL_GENERATION.requested && !runtimeConfig.gateResolution.AUTO_SKILL_GENERATION.effective) {
+    return
+  }
   if (
     feature('SKILL_IMPROVEMENT') &&
     getFeatureValue_CACHED_MAY_BE_STALE('tengu_copper_panda', false)
@@ -188,11 +203,41 @@ export function initSkillImprovement(): void {
 export async function applySkillImprovement(
   skillName: string,
   updates: SkillUpdate[],
+  memoryV2Gates: FeatureGateRequest = {},
+  generatedSkillOptions: GeneratedSkillStoreOptions = {},
 ): Promise<void> {
   if (!skillName) return
 
   const { join } = await import('path')
   const fs = await import('fs/promises')
+  const runtimeConfig = getMemoryV2SkillRuntimeConfig()
+  const effectiveGates = Object.keys(memoryV2Gates).length > 0 ? memoryV2Gates : runtimeConfig.gates
+  const effectiveOptions = Object.keys(generatedSkillOptions).length > 0
+    ? generatedSkillOptions
+    : runtimeConfig.generatedSkillOptions ?? {}
+  const v2StoreEnabled = runtimeConfig.gateResolution && Object.keys(memoryV2Gates).length === 0
+    ? runtimeConfig.gateResolution.SKILL_STORE_V2.effective
+    : isFeatureGateEnabled('SKILL_STORE_V2', effectiveGates)
+  const v2GenerationEnabled = runtimeConfig.gateResolution && Object.keys(memoryV2Gates).length === 0
+    ? runtimeConfig.gateResolution.AUTO_SKILL_GENERATION.effective
+    : isFeatureGateEnabled('AUTO_SKILL_GENERATION', effectiveGates)
+  if (runtimeConfig.gateResolution && Object.keys(memoryV2Gates).length === 0 && runtimeConfig.gateResolution.AUTO_SKILL_GENERATION.requested && !v2GenerationEnabled) {
+    throw new Error(`AUTO_SKILL_GENERATION unavailable: blockedBy=${runtimeConfig.gateResolution.AUTO_SKILL_GENERATION.blockedBy.join(',')}`)
+  }
+  if (v2StoreEnabled && !v2GenerationEnabled) return
+
+  const generatedSkillRoot = join(getCwd(), '.claude', 'skills')
+  let effectiveGeneratedSkillOptions = effectiveOptions
+  if (v2GenerationEnabled && (!effectiveOptions.attestationKey || !isVerifiedGeneratedSkillMutationCapability(effectiveOptions.mutationCapability))) {
+    const resolution = resolveGeneratedSkillStoreOptions(
+      generatedSkillRoot,
+      `skill-improvement:${randomUUID()}`,
+      undefined,
+      effectiveOptions.mutationCapability,
+    )
+    if (!resolution.available) throw new Error(`AUTO_SKILL_GENERATION unavailable: ${resolution.reason}`)
+    effectiveGeneratedSkillOptions = { ...resolution.options, ...generatedSkillOptions }
+  }
 
   // Skills live at .claude/skills/<name>/SKILL.md relative to CWD
   const filePath = join(getCwd(), '.claude', 'skills', skillName, 'SKILL.md')
@@ -201,6 +246,7 @@ export async function applySkillImprovement(
   try {
     currentContent = await fs.readFile(filePath, 'utf-8')
   } catch {
+    if (v2StoreEnabled) throw new Error(`Failed to read skill file for improvement: ${filePath}`)
     logError(
       new Error(`Failed to read skill file for improvement: ${filePath}`),
     )
@@ -208,6 +254,12 @@ export async function applySkillImprovement(
   }
 
   const updateList = updates.map(u => `- ${u.section}: ${u.change}`).join('\n')
+  const remotePayload = v2StoreEnabled
+    ? sanitizeReviewerPayload({ current_skill_file: currentContent, improvements: updateList })
+    : undefined
+  const remoteFields = remotePayload?.sanitized as { current_skill_file: string; improvements: string } | undefined
+  const remoteCurrentContent = remoteFields?.current_skill_file ?? currentContent
+  const remoteUpdateList = remoteFields?.improvements ?? updateList
 
   const response = await queryModelWithoutStreaming({
     messages: [
@@ -215,14 +267,15 @@ export async function applySkillImprovement(
         content: `You are editing a skill definition file. Apply the following improvements to the skill.
 
 <current_skill_file>
-${currentContent}
+${remoteCurrentContent}
 </current_skill_file>
 
 <improvements>
-${updateList}
+${remoteUpdateList}
 </improvements>
 
 Rules:
+- ${v2StoreEnabled ? REVIEWER_PLACEHOLDER_INSTRUCTIONS : 'Preserve the source content faithfully'}
 - Integrate the improvements naturally into the existing structure
 - Preserve frontmatter (--- block) exactly as-is
 - Preserve the overall format and style
@@ -253,15 +306,37 @@ Rules:
 
   const updatedContent = extractTag(responseText, 'updated_file')
   if (!updatedContent) {
+    if (v2StoreEnabled) throw new Error('Skill improvement apply: no updated_file tag in response')
     logError(
       new Error('Skill improvement apply: no updated_file tag in response'),
     )
     return
   }
 
+  if (v2StoreEnabled) {
+    try {
+      validateReviewerOutput(remotePayload!, updatedContent)
+    } catch (error) {
+      throw toError(error)
+    }
+  }
+
   try {
-    await fs.writeFile(filePath, updatedContent, 'utf-8')
+    if (v2GenerationEnabled) {
+      const generatedName = skillName.replace(/[^A-Za-z0-9._-]/g, '-').replace(/^-+/, '').slice(0, 128) || 'generated-skill'
+      const store = new GeneratedSkillStore(generatedSkillRoot, effectiveGates, effectiveGeneratedSkillOptions)
+      try {
+        await store.read(generatedName)
+        await store.mutate(generatedName, updatedContent)
+      } catch (error) {
+        if (!(error instanceof GeneratedSkillNotFoundError)) throw error
+        await store.create({ name: generatedName, content: updatedContent, evidence: [skillName] })
+      }
+    } else {
+      await fs.writeFile(filePath, updatedContent, 'utf-8')
+    }
   } catch (e) {
+    if (v2StoreEnabled) throw e
     logError(toError(e))
   }
 }

@@ -35,7 +35,9 @@ export type RequestExtraOverride = {
 export const REASONING_EFFORT_PLACEHOLDER = '$reasoning_effort'
 
 function normalizeModel(model: string): string {
-  return model.trim().toLowerCase()
+  // Match normalizeModelApiName behavior: strip query params before lookup
+  // so overrides work consistently with catalog matching
+  return model.trim().toLowerCase().split('?')[0]
 }
 
 export function matchOverride(override: RequestExtraOverride, model: string): boolean {

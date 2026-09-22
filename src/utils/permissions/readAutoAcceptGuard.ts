@@ -260,13 +260,11 @@ export function isAutoNewSeededReadPath(absPath: string, cwd: string): boolean {
   const normPath = normalizeForComparison(absPath)
   const sep = getNativeSeparator()
 
-  // Workspace-scoped seed dirs: <cwd>/temp and <cwd>/.claude
   const normCwd = normalizeForComparison(cwd).replace(/[\\/]+$/, '')
-  for (const subdir of ['temp', '.claude']) {
-    const prefix = `${normCwd}${sep}${subdir}`
-    if (normPath === prefix || normPath.startsWith(prefix + sep)) {
-      return true
-    }
+
+  // Workspace root itself: any path under the project is seeded
+  if (normPath === normCwd || normPath.startsWith(normCwd + sep)) {
+    return true
   }
 
   // OS temp / AppData temp seed dir

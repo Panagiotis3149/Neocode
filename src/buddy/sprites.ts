@@ -437,7 +437,7 @@ const BODIES: Record<Species, string[][]> = {
       ' (   ..   ) ',
       '  `------´~ ',
     ],
-  ],
+  ]
 }
 
 const HAT_LINES: Record<Hat, string> = {
@@ -510,5 +510,5 @@ export function renderFace(bones: CompanionBones): string {
       return `|${eye}  ${eye}|`
     case chonk:
       return `(${eye}.${eye})`
-  }
+    }
 }

@@ -424,6 +424,7 @@ export function renderToolUseTag(input: Partial<{
   prompt: string;
   subagent_type: string;
   model?: string;
+  provider?: string;
 }>): React.ReactNode {
   const tags: React.ReactNode[] = [];
   if (input.model) {
@@ -434,6 +435,11 @@ export function renderToolUseTag(input: Partial<{
           <Text dimColor>{renderModelName(agentModel)}</Text>
         </Box>);
     }
+  }
+  if (input.provider) {
+    tags.push(<Box key="provider" flexWrap="nowrap" marginLeft={1}>
+        <Text dimColor>{input.provider}</Text>
+      </Box>);
   }
   if (tags.length === 0) {
     return null;

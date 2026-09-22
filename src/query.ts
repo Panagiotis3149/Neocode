@@ -28,7 +28,11 @@ import {
 import { ImageSizeError } from './utils/imageValidation.js'
 import { ImageResizeError } from './utils/imageResizer.js'
 import { findToolByName, type ToolUseContext } from './Tool.js'
-import { asSystemPrompt, type SystemPrompt } from './utils/systemPromptType.js'
+import {
+  asSystemPrompt,
+  inheritSystemPromptMetadata,
+  type SystemPrompt,
+} from './utils/systemPromptType.js'
 import type {
   AssistantMessage,
   AttachmentMessage,
@@ -122,6 +126,11 @@ import {
 } from './bootstrap/state.js'
 import { createBudgetTracker, checkTokenBudget } from './query/tokenBudget.js'
 import { count } from './utils/array.js'
+import {
+  commitRegisteredMemoryPrompt,
+  getMemoryPromptV2TransportQueue,
+  hasRegisteredMemoryPrompt,
+} from './memdir/memdir.js'
 /* eslint-disable @typescript-eslint/no-require-imports */
 const snipModule = feature('HISTORY_SNIP')
   ? (require('./services/compact/snipCompact.js') as typeof import('./services/compact/snipCompact.js'))
@@ -156,6 +165,31 @@ function* yieldMissingToolResultBlocks(
         sourceToolAssistantUUID: assistantMessage.uuid,
       })
     }
+  }
+}
+
+async function* markMemoryPromptSentAfterFirstAdvance<T>(
+  stream: AsyncIterable<T>,
+  onFirstAdvance: () => void,
+): AsyncGenerator<T> {
+  const iterator = stream[Symbol.asyncIterator]()
+  let firstAdvance = true
+  let completed = false
+  try {
+    while (true) {
+      const result = await iterator.next()
+      if (firstAdvance) {
+        firstAdvance = false
+        onFirstAdvance()
+      }
+      if (result.done) {
+        completed = true
+        return result.value
+      }
+      yield result.value
+    }
+  } finally {
+    if (!completed && iterator.return) await iterator.return()
   }
 }
 
@@ -536,13 +570,17 @@ async function* queryLoop(
         const { getArcSummary } = await import('./utils/conversationArc.js')
         const arcSummary = await getArcSummary(userQueryText)
         if (arcSummary) {
-          promptWithArc = [...systemPrompt, arcSummary]
+          promptWithArc = inheritSystemPromptMetadata(
+            [...systemPrompt, arcSummary],
+            systemPrompt,
+          )
         }
       }
     }
 
-    const fullSystemPrompt = asSystemPrompt(
-      appendSystemContext(asSystemPrompt(promptWithArc), systemContext),
+    const fullSystemPrompt = inheritSystemPromptMetadata(
+      asSystemPrompt(appendSystemContext(asSystemPrompt(promptWithArc), systemContext)),
+      promptWithArc,
     )
 
     // Force compaction if memory pressure detected or message count exceeded.
@@ -831,17 +869,43 @@ async function* queryLoop(
     }
 
     let attemptWithFallback = true
+    let committedMemoryPrompt: ReturnType<typeof commitRegisteredMemoryPrompt> | null = null
+    let committedMemoryPayload: unknown = null
+    let outboundSystemPrompt = fullSystemPrompt
+    let memoryPromptSent = false
 
     queryCheckpoint('query_api_loop_start')
     try {
+      const memoryPromptWasRegistered = hasRegisteredMemoryPrompt(fullSystemPrompt)
+      if (memoryPromptWasRegistered) {
+        const memoryPromptTransport = getMemoryPromptV2TransportQueue()
+        if (!memoryPromptTransport) {
+          throw new Error('Memory V2 transport queue is unavailable at the model handoff')
+        }
+        committedMemoryPrompt = commitRegisteredMemoryPrompt(fullSystemPrompt, memoryPromptTransport)
+        committedMemoryPayload = memoryPromptTransport.consume(committedMemoryPrompt.receipt)
+        if (
+          committedMemoryPayload !== committedMemoryPrompt.request.payload ||
+          typeof committedMemoryPayload !== 'string'
+        ) {
+          throw new Error('Memory V2 transport payload ownership mismatch')
+        }
+        outboundSystemPrompt = asSystemPrompt(
+          fullSystemPrompt.map(section =>
+            section === committedMemoryPrompt!.text
+              ? committedMemoryPayload as string
+              : section,
+          ),
+        )
+      }
       while (attemptWithFallback) {
         attemptWithFallback = false
         try {
           let streamingFallbackOccured = false
           queryCheckpoint('query_api_streaming_start')
-          for await (const message of deps.callModel({
+          const modelStream = deps.callModel({
             messages: prependUserContext(messagesForQuery, userContext),
-            systemPrompt: fullSystemPrompt,
+            systemPrompt: outboundSystemPrompt,
             thinkingConfig: toolUseContext.options.thinkingConfig,
             tools: toolUseContext.options.tools,
             signal: toolUseContext.abortController.signal,
@@ -874,7 +938,10 @@ async function* queryLoop(
                 c => c.type === 'pending',
               ),
               queryTracking,
-              effortValue: appState.effortValue,
+              effortValue:
+                toolUseContext.options.effortValue ?? appState.effortValue,
+              temperatureOverride:
+                toolUseContext.options.temperatureOverride,
               advisorModel: appState.advisorModel,
               skipCacheWrite,
               agentId: toolUseContext.agentId,
@@ -889,7 +956,15 @@ async function* queryLoop(
                 },
               }),
             },
-          })) {
+          })
+          const handedOffModelStream =
+            committedMemoryPrompt && !memoryPromptSent
+              ? markMemoryPromptSentAfterFirstAdvance(modelStream, () => {
+                  committedMemoryPrompt!.fence.markSent(committedMemoryPrompt!.request.requestId)
+                  memoryPromptSent = true
+                })
+              : modelStream
+          for await (const message of handedOffModelStream) {
             // We won't use the tool_calls from the first attempt
             // We could.. but then we'd have to merge assistant messages
             // with different ids and double up on full the tool_results

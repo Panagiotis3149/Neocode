@@ -398,7 +398,7 @@ export async function getAnthropicClient({
   // Agent routing override: use per-agent provider when configured.
   // Strip auth-related headers to prevent leaking Anthropic credentials
   // to third-party endpoints (SSRF / credential forwarding mitigation).
-  if (providerOverride) {
+  if (providerOverride && getAPIProvider() !== 'firstParty') {
     const { createOpenAIShimClient } = await import('./openaiShim.js')
     const safeHeaders: Record<string, string> = {}
     for (const [k, v] of Object.entries(defaultHeaders)) {

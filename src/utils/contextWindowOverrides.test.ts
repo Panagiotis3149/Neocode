@@ -121,3 +121,10 @@ test('normalizeModel: case insensitive and trim', () => {
   expect(getContextWindowOverride('  openai/gpt-4  ')?.contextWindowTokens).toBe(256000) // trim applied
   expect(getContextWindowOverride('openai/gpt-4')).toBeDefined()
 })
+
+test('normalizeModel: strips query params for override lookup', () => {
+  setContextWindowOverride('deepseek-ai/deepseek-v4-pro', 1000000)
+  expect(getContextWindowOverride('deepseek-ai/deepseek-v4-pro?reasoning=high')?.contextWindowTokens).toBe(1000000)
+  expect(getContextWindowOverride('deepseek-ai/deepseek-v4-pro?thinking=medium')?.contextWindowTokens).toBe(1000000)
+  expect(getContextWindowOverride('deepseek-ai/deepseek-v4-pro?anything=foo')?.contextWindowTokens).toBe(1000000)
+})

@@ -1,5 +1,7 @@
 import { BASH_TOOL_NAME } from 'src/tools/BashTool/toolName.js'
-import { FILE_READ_TOOL_NAME } from 'src/tools/FileReadTool/prompt.js'
+// Leaf-module import: FileReadTool/prompt.js pulls pdfUtils -> model graph and
+// this file dereferences FILE_READ_TOOL_NAME at module level (tools: array).
+import { FILE_READ_TOOL_NAME } from 'src/tools/FileReadTool/constants.js'
 import { GLOB_TOOL_NAME } from 'src/tools/GlobTool/prompt.js'
 import { GREP_TOOL_NAME } from 'src/tools/GrepTool/prompt.js'
 import { SEND_MESSAGE_TOOL_NAME } from 'src/tools/SendMessageTool/constants.js'

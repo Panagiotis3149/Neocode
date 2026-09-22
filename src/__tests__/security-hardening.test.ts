@@ -59,6 +59,21 @@ describe('Sandbox settings trust boundary', () => {
   })
 })
 
+describe('Worktree path trust boundary', () => {
+  test('rejects reserved Git worktree names and validates canonical paths', async () => {
+    const worktree = await file('utils/worktree.ts').text()
+    const pathSecurity = await file('utils/worktreePathSecurity.ts').text()
+    const sandbox = await file('utils/sandbox/sandbox-adapter.ts').text()
+
+    expect(worktree).toContain('validateWorktreeSlug')
+    expect(pathSecurity).toContain("segment.toLowerCase() === '.git'")
+    expect(pathSecurity).toContain('assertWorktreePathForCreation')
+    expect(pathSecurity).toContain('realpath')
+    expect(sandbox).toContain('findCanonicalGitRoot')
+    expect(sandbox).not.toContain('lastIndexOf(marker)')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Fix 3: Plugin git hooks disabled
 // ---------------------------------------------------------------------------

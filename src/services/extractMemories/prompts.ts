@@ -12,6 +12,7 @@
 import { feature } from 'bun:bundle'
 import {
   MEMORY_FRONTMATTER_EXAMPLE,
+  MEMORY_TYPE_CHAR_LIMITS,
   TYPES_SECTION_COMBINED,
   TYPES_SECTION_INDIVIDUAL,
   WHAT_NOT_TO_SAVE_SECTION,
@@ -89,6 +90,12 @@ export function buildExtractAutoOnlyPrompt(
     ...TYPES_SECTION_INDIVIDUAL,
     ...WHAT_NOT_TO_SAVE_SECTION,
     '',
+    '## Character limits per memory type (enforced at write time; truncated files get `truncated: true` frontmatter):',
+    '',
+    ...Object.entries(MEMORY_TYPE_CHAR_LIMITS).map(
+      ([type, limit]) => `- ${type}: ${limit} chars`,
+    ),
+    '',
     ...howToSave,
   ].join('\n')
 }
@@ -148,6 +155,12 @@ export function buildExtractCombinedPrompt(
     ...TYPES_SECTION_COMBINED,
     ...WHAT_NOT_TO_SAVE_SECTION,
     '- You MUST avoid saving sensitive data within shared team memories. For example, never save API keys or user credentials.',
+    '',
+    '## Character limits per memory type (enforced at write time; truncated files get `truncated: true` frontmatter):',
+    '',
+    ...Object.entries(MEMORY_TYPE_CHAR_LIMITS).map(
+      ([type, limit]) => `- ${type}: ${limit} chars`,
+    ),
     '',
     ...howToSave,
   ].join('\n')

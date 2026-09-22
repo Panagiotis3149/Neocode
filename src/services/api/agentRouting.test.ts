@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, mock, test } from 'bun:test'
 import {
   applyAgentProviderOverrideToEnv,
   resolveAgentModelProvider,
@@ -8,6 +8,58 @@ import {
   resolveOutOfProcessTeammateProviderFromCliArgs,
 } from './agentRouting.js'
 import type { SettingsJson } from '../../utils/settings/types.js'
+import type { ProviderProfile } from '../../utils/config.js'
+
+// bun's mock.module() is sticky for the whole worker process (mock.restore()
+// does not revert it), so the mock reads from this mutable slot instead of a
+// closed-over single profile. It defaults to [] so leakage into unrelated
+// suites running later in the same process is inert.
+let mockProviderProfiles: ProviderProfile[] = []
+
+/**
+ * Mock src/utils/config.js so `getGlobalConfig().providerProfiles` returns
+ * `mockProviderProfiles`. Call setProfiles(...) at the start of each test and
+ * setProfiles([]) when done.
+ */
+async function setupProviderProfileMock() {
+  // Query-string nonce bypasses bun's module registry so we capture the REAL
+  // config module — after mock.module() the plain specifier would return the
+  // mock itself (infinite recursion in getGlobalConfig).
+  const actualConfig = await import(
+    `../../utils/config.js?ts=${Date.now()}-${Math.random()}`
+  )
+  mock.module('../../utils/config.js', () => ({
+    ...actualConfig,
+    getGlobalConfig: () => ({
+      ...actualConfig.getGlobalConfig(),
+      providerProfiles: mockProviderProfiles,
+    }),
+  }))
+  // Other suites (e.g. ProviderManager.test.tsx) sticky-mock
+  // providerProfiles.js per worker with hand-listed exports. agentRouting.js
+  // statically imports findProviderProfileByIdOrName from it, so re-register
+  // a fresh REAL instance AFTER the config mock: its getGlobalConfig binding
+  // then resolves against the mock above and the profile slot works.
+  const actualProviderProfiles = await import(
+    `../../utils/providerProfiles.js?ts=${Date.now()}-${Math.random()}`
+  )
+  mock.module('../../utils/providerProfiles.js', () => actualProviderProfiles)
+  return {
+    setProfiles(profiles: ProviderProfile[]) {
+      mockProviderProfiles = profiles
+    },
+  }
+}
+
+function buildTestProfile(
+  overrides: Partial<ProviderProfile> & Pick<ProviderProfile, 'id' | 'name' | 'model'>,
+): ProviderProfile {
+  return {
+    provider: 'openai',
+    baseUrl: 'https://api.example.com/v1',
+    ...overrides,
+  }
+}
 
 const baseSettings = {
   agentModels: {
@@ -417,5 +469,66 @@ describe('applyAgentProviderOverrideToEnv', () => {
     expect(env.OPENAI_AUTH_HEADER).toBeUndefined()
     expect(env.GEMINI_API_KEY).toBe('gemini-key')
     expect(env.ANTHROPIC_API_KEY).toBe('anthropic-key')
+  })
+})
+
+describe('resolveAgentProviderProfile', () => {
+  test('builds ProviderOverride from a resolved profile (primary model, baseUrl, apiKey)', async () => {
+    const { resolveAgentProviderProfile } = await import('./agentRouting.js')
+    const { setProfiles } = await setupProviderProfileMock()
+    setProfiles([
+      buildTestProfile({
+        id: 'prof_fast',
+        name: 'Fast Route',
+        provider: 'openai',
+        baseUrl: 'https://fast.example/v1',
+        apiKey: 'sk-fast',
+        model: 'fast-model, fast-mini',
+      }),
+    ])
+
+    try {
+      expect(resolveAgentProviderProfile({ provider: 'prof_fast' })).toEqual({
+        model: 'fast-model',
+        baseURL: 'https://fast.example/v1',
+        apiKey: 'sk-fast',
+      })
+
+      // Display-name resolution works too
+      expect(resolveAgentProviderProfile({ provider: '  Fast Route ' })).toEqual({
+        model: 'fast-model',
+        baseURL: 'https://fast.example/v1',
+        apiKey: 'sk-fast',
+      })
+    } finally {
+      setProfiles([])
+    }
+  })
+
+  test('inherits the primary profile model (no separate model field on profiles)', async () => {
+    const { resolveAgentProviderProfile } = await import('./agentRouting.js')
+    const { setProfiles } = await setupProviderProfileMock()
+    setProfiles([buildTestProfile({ id: 'solo', name: 'Solo Route', model: 'only-model' })])
+
+    try {
+      expect(resolveAgentProviderProfile({ provider: 'solo' })?.model).toBe('only-model')
+    } finally {
+      setProfiles([])
+    }
+  })
+
+  test('returns null for unknown or blank provider selectors', async () => {
+    const { resolveAgentProviderProfile } = await import('./agentRouting.js')
+    const { setProfiles } = await setupProviderProfileMock()
+    setProfiles([buildTestProfile({ id: 'known', name: 'Known Route', model: 'known-model' })])
+
+    try {
+      expect(resolveAgentProviderProfile({ provider: 'no-such-route' })).toBeNull()
+      expect(resolveAgentProviderProfile({ provider: '' })).toBeNull()
+      expect(resolveAgentProviderProfile({ provider: '   ' })).toBeNull()
+      expect(resolveAgentProviderProfile({})).toBeNull()
+    } finally {
+      setProfiles([])
+    }
   })
 })

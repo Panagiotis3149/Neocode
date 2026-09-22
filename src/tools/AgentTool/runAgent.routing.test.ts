@@ -13,6 +13,7 @@ import {
   resetSettingsCache,
 } from '../../utils/settings/settingsCache.js'
 import type { SettingsJson } from '../../utils/settings/types.js'
+import type { ProviderProfile } from '../../utils/config.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 import type { runAgent as runAgentFn } from './runAgent.js'
 
@@ -136,7 +137,7 @@ describe('runAgent provider routing', () => {
     )
   })
 
-  test('does not recheck non-routed alias resolutions', async () => {
+test('does not recheck non-routed alias resolutions', async () => {
     settingsForTest = {
       ...routedSettings,
       agentRouting: {},
@@ -165,7 +166,129 @@ describe('runAgent provider routing', () => {
     })
 
     await expect(generator.next()).rejects.toBe(stop)
-    expect(capturedContext?.options.providerOverride).toBeUndefined()
+  expect(capturedContext?.options.providerOverride).toBeUndefined()
+})
+
+test('canShowPermissionPrompts clears an inherited headless permission flag', async () => {
+  const parentContext = createToolUseContext('parent-model', true)
+  const stop = new Error('stop after cache-safe params')
+  let capturedContext: ToolUseContext | undefined
+  const runAgent = await importRunAgent()
+
+  const generator = runAgent({
+    agentDefinition: createAgentDefinition(),
+    promptMessages: [createUserMessage({ content: 'inspect this' })],
+    toolUseContext: parentContext,
+    canUseTool: async () => ({ behavior: 'allow' }),
+    canShowPermissionPrompts: true,
+    isAsync: true,
+    querySource: 'agent:builtin:general-purpose',
+    availableTools: [],
+    onCacheSafeParams: params => {
+      capturedContext = params.toolUseContext
+      throw stop
+    },
+  })
+
+  await expect(generator.next()).rejects.toBe(stop)
+  expect(
+    capturedContext?.getAppState().toolPermissionContext
+      .shouldAvoidPermissionPrompts,
+  ).toBe(false)
+})
+
+test('provider profile wins over settings agentRouting', async () => {
+    settingsForTest = { ...routedSettings }
+    allowedModelsForTest = ['parent-model', 'profile-model']
+
+    const { setProfiles } = await setupRunAgentProfileMock()
+    setProfiles([
+      buildRoutingTestProfile({
+        id: 'prof_route',
+        name: 'Route Profile',
+        baseUrl: 'https://profile.example/v1',
+        apiKey: 'sk-profile',
+        model: 'profile-model',
+      }),
+    ])
+
+    const parentContext = createToolUseContext('parent-model')
+    const stop = new Error('stop after cache-safe params')
+    let capturedContext: ToolUseContext | undefined
+    const runAgent = await importRunAgent()
+
+    try {
+      const generator = runAgent({
+        agentDefinition: createAgentDefinition(),
+        promptMessages: [createUserMessage({ content: 'route me' })],
+        toolUseContext: parentContext,
+        canUseTool: async () => ({ behavior: 'allow' }),
+        isAsync: false,
+        querySource: 'agent:builtin:general-purpose',
+        availableTools: [],
+        provider: 'prof_route',
+        onCacheSafeParams: params => {
+          capturedContext = params.toolUseContext
+          throw stop
+        },
+      })
+
+      await expect(generator.next()).rejects.toBe(stop)
+      expect(capturedContext?.options.providerOverride).toEqual({
+        model: 'profile-model',
+        baseURL: 'https://profile.example/v1',
+        apiKey: 'sk-profile',
+      })
+    } finally {
+      setProfiles([])
+    }
+  })
+
+  test('unresolvable provider profile warns and falls back to settings routing', async () => {
+    settingsForTest = { ...routedSettings }
+    allowedModelsForTest = ['parent-model', 'deepseek-grunt']
+
+    const { setProfiles } = await setupRunAgentProfileMock()
+    setProfiles([])
+
+    const warnSpy: string[] = []
+    const origWarn = console.warn
+    console.warn = (msg?: unknown) => {
+      warnSpy.push(String(msg))
+    }
+
+    const parentContext = createToolUseContext('parent-model')
+    const stop = new Error('stop after cache-safe params')
+    let capturedContext: ToolUseContext | undefined
+    const runAgent = await importRunAgent()
+
+    try {
+      const generator = runAgent({
+        agentDefinition: createAgentDefinition(),
+        promptMessages: [createUserMessage({ content: 'route me' })],
+        toolUseContext: parentContext,
+        canUseTool: async () => ({ behavior: 'allow' }),
+        isAsync: false,
+        querySource: 'agent:builtin:general-purpose',
+        availableTools: [],
+        provider: 'no-such-route',
+        onCacheSafeParams: params => {
+          capturedContext = params.toolUseContext
+          throw stop
+        },
+      })
+
+      await expect(generator.next()).rejects.toBe(stop)
+      expect(capturedContext?.options.providerOverride).toEqual({
+        model: 'deepseek-grunt',
+        baseURL: 'https://api.deepseek.com/v1',
+        apiKey: 'sk-test',
+      })
+      expect(warnSpy.some(m => m.includes('no-such-route'))).toBe(true)
+    } finally {
+      console.warn = origWarn
+      setProfiles([])
+    }
   })
 })
 
@@ -179,13 +302,57 @@ function createAgentDefinition(): AgentDefinition {
   } as unknown as AgentDefinition
 }
 
+// bun's mock.module() is sticky for the whole worker process, so the mock reads
+// from a mutable slot (defaults to [] so leakage into later suites is inert).
+let routingTestProfiles: ProviderProfile[] = []
+
+async function setupRunAgentProfileMock() {
+  const actualConfig = await import(
+    `../../utils/config.ts?runAgentRoutingConfig=${Date.now()}-${Math.random()}`
+  )
+  mock.module('../../utils/config.js', () => ({
+    ...actualConfig,
+    getGlobalConfig: () => ({
+      ...actualConfig.getGlobalConfig(),
+      providerProfiles: routingTestProfiles,
+    }),
+  }))
+  // Other suites (e.g. ProviderManager.test.tsx) sticky-mock
+  // providerProfiles.js per worker with hand-listed exports. runAgent.ts
+  // resolves profiles through findProviderProfileByIdOrName from it, so
+  // re-register a fresh REAL instance AFTER the config mock: its
+  // getGlobalConfig binding then sees the profile slot above.
+  const actualProviderProfiles = await import(
+    `../../utils/providerProfiles.js?ts=${Date.now()}-${Math.random()}`
+  )
+  mock.module('../../utils/providerProfiles.js', () => actualProviderProfiles)
+  return {
+    setProfiles(profiles: ProviderProfile[]) {
+      routingTestProfiles = profiles
+    },
+  }
+}
+
+function buildRoutingTestProfile(
+  overrides: Partial<ProviderProfile> & Pick<ProviderProfile, 'id' | 'name' | 'model'>,
+): ProviderProfile {
+  return {
+    provider: 'openai',
+    baseUrl: 'https://api.example.com/v1',
+    ...overrides,
+  }
+}
+
 async function importRunAgent(): Promise<typeof runAgentFn> {
   const stamp = `${Date.now()}-${Math.random()}`
   const module = await import(`./runAgent.ts?runAgentRouting=${stamp}`)
   return module.runAgent
 }
 
-function createToolUseContext(mainLoopModel: string): ToolUseContext {
+function createToolUseContext(
+  mainLoopModel: string,
+  shouldAvoidPermissionPrompts = false,
+): ToolUseContext {
   const appState = {
     mainLoopModel,
     mainLoopModelForSession: mainLoopModel,
@@ -195,6 +362,9 @@ function createToolUseContext(mainLoopModel: string): ToolUseContext {
       alwaysAllowRules: {},
       alwaysDenyRules: {},
       alwaysAskRules: {},
+      ...(shouldAvoidPermissionPrompts
+        ? { shouldAvoidPermissionPrompts: true }
+        : {}),
     },
     mcp: {
       clients: [],

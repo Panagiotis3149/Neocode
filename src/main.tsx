@@ -21,7 +21,7 @@ startKeychainPrefetch();
 import { feature } from 'bun:bundle';
 import { Command as CommanderCommand, InvalidArgumentError, Option } from '@commander-js/extra-typings';
 import chalk from 'chalk';
-import { readFileSync } from 'fs';
+import { readFileSync, unlinkSync } from 'fs';
 import mapValues from 'lodash-es/mapValues.js';
 import pickBy from 'lodash-es/pickBy.js';
 import uniqBy from 'lodash-es/uniqBy.js';
@@ -149,6 +149,13 @@ import { areMcpConfigsAllowedWithEnterpriseMcpConfig, dedupClaudeAiMcpServers, d
 import { excludeCommandsByServer, excludeResourcesByServer } from 'src/services/mcp/utils.js';
 import { isXaaEnabled } from 'src/services/mcp/xaaIdpLogin.js';
 import { getRelevantTips } from 'src/services/tips/tipRegistry.js';
+import { getAutoMemPath } from './memdir/paths.js';
+import { createMemoryPromptTransportQueue } from './memdir/memdir.js';
+import { initializeMemoryV2Runtime } from './services/memoryV2/runtime.js';
+import { createNativeGeneratedSkillMutationCapability, resolveGeneratedSkillStoreOptions, type GeneratedSkillStoreOptions } from './services/generatedSkills/store.js';
+import { MEMORY_V2_EXTERNAL_BLOCKERS, type FeatureGateBlockers } from './services/memoryV2/featureGates.js';
+import { SessionCryptoManager } from './services/sessionCrypto/sessionCrypto.js';
+import { BunSqliteRawCapsulePersistence, createSessionCryptoRawCapsuleCryptor, EncryptedRawCapsuleStore } from './services/compact/rawCapsules.js';
 import { logContextMetrics } from 'src/utils/api.js';
 import { CLAUDE_IN_CHROME_MCP_SERVER_NAME, isClaudeInChromeMCPServer } from 'src/utils/claudeInChrome/common.js';
 import { registerCleanup } from 'src/utils/cleanupRegistry.js';
@@ -1878,8 +1885,9 @@ async function run(): Promise<CommanderCommand> {
       initBundledSkills();
     }
     const setupPromise = setup(preSetupCwd, permissionMode, allowDangerouslySkipPermissions, worktreeEnabled, worktreeName, tmuxEnabled, sessionId ? validateUuid(sessionId) : undefined, worktreePRNumber, messagingSocketPath);
-    const commandsPromise = worktreeEnabled ? null : getCommands(preSetupCwd);
-    const agentDefsPromise = worktreeEnabled ? null : getAgentDefinitionsWithOverrides(preSetupCwd);
+    const memoryV2Requested = isEnvTruthy(process.env.NEOCODE_MEMORY_V2);
+    let commandsPromise = memoryV2Requested || worktreeEnabled ? null : getCommands(preSetupCwd);
+    let agentDefsPromise = memoryV2Requested || worktreeEnabled ? null : getAgentDefinitionsWithOverrides(preSetupCwd);
     // Suppress transient unhandledRejection if these reject during the
     // ~28ms setupPromise await before Promise.all joins them below.
     commandsPromise?.catch(() => {});
@@ -1887,6 +1895,95 @@ async function run(): Promise<CommanderCommand> {
     await setupPromise;
     logForDebugging(`[STARTUP] setup() completed in ${Date.now() - setupStart}ms`);
     profileCheckpoint('action_after_setup');
+
+    const currentCwd = worktreeEnabled ? getCwd() : preSetupCwd;
+    const memoryV2DbPath = resolve(getAutoMemPath(), 'memory-v2.sqlite');
+    const sessionCryptoManager = memoryV2Requested ? new SessionCryptoManager() : null;
+    const sessionCryptoAvailable = sessionCryptoManager ? await sessionCryptoManager.isAvailable() : false;
+    const retrievalCompactionRequested = isEnvTruthy(process.env.NEOCODE_RETRIEVAL_COMPACTION);
+    let rawCapsuleStore: EncryptedRawCapsuleStore | undefined;
+    let rawCapsuleWriter: Awaited<ReturnType<SessionCryptoManager['acquireWriter']>> | undefined;
+    if (retrievalCompactionRequested && sessionCryptoManager && sessionCryptoAvailable) {
+      try {
+        rawCapsuleWriter = await sessionCryptoManager.acquireWriter(getSessionId(), 0n);
+        rawCapsuleStore = new EncryptedRawCapsuleStore({
+          sessionId: getSessionId(),
+          projectScopeId: resolve(currentCwd),
+          sessionRetentionDeadline: Date.now() + 30 * 24 * 60 * 60 * 1000,
+          gates: { RETRIEVAL_COMPACTION: true },
+          persistence: new BunSqliteRawCapsulePersistence(memoryV2DbPath),
+          cryptor: createSessionCryptoRawCapsuleCryptor({ manager: sessionCryptoManager, writer: rawCapsuleWriter, projectScopeId: resolve(currentCwd) }),
+        });
+      } catch {
+        await rawCapsuleWriter?.close().catch(() => {});
+        rawCapsuleWriter = undefined;
+      }
+    }
+    const skillStoreRequested = isEnvTruthy(process.env.NEOCODE_SKILL_STORE_V2);
+    const autoSkillGenerationRequested = isEnvTruthy(process.env.NEOCODE_AUTO_SKILL_GENERATION);
+    const skillGateBlockers: FeatureGateBlockers = {};
+    let generatedSkillOptions: GeneratedSkillStoreOptions | undefined;
+    if (skillStoreRequested && autoSkillGenerationRequested) {
+      const generatedSkillRoot = resolve(currentCwd, '.claude', 'skills');
+      if (process.platform === 'win32') {
+        skillGateBlockers.AUTO_SKILL_GENERATION = [MEMORY_V2_EXTERNAL_BLOCKERS.WINDOWS_NOFOLLOW_MUTATION_UNAVAILABLE];
+      } else {
+        const mutationCapability = createNativeGeneratedSkillMutationCapability(generatedSkillRoot, `skill-improvement:${getSessionId()}`);
+        if (!mutationCapability) {
+          skillGateBlockers.AUTO_SKILL_GENERATION = [MEMORY_V2_EXTERNAL_BLOCKERS.GENERATED_SKILL_MUTATION_CAPABILITY_UNAVAILABLE];
+        } else {
+          try {
+            const resolution = resolveGeneratedSkillStoreOptions(generatedSkillRoot, `skill-improvement:${getSessionId()}`, undefined, mutationCapability);
+            if (resolution.available) {
+              generatedSkillOptions = resolution.options;
+            } else {
+              skillGateBlockers.AUTO_SKILL_GENERATION = [resolution.reason.includes('secure storage')
+                ? MEMORY_V2_EXTERNAL_BLOCKERS.GENERATED_SKILL_SECURE_STORAGE_UNAVAILABLE
+                : MEMORY_V2_EXTERNAL_BLOCKERS.GENERATED_SKILL_MUTATION_CAPABILITY_UNAVAILABLE];
+            }
+          } catch {
+            skillGateBlockers.AUTO_SKILL_GENERATION = [MEMORY_V2_EXTERNAL_BLOCKERS.GENERATED_SKILL_SECURE_STORAGE_UNAVAILABLE];
+          }
+        }
+      }
+    }
+    const memoryV2Runtime = await initializeMemoryV2Runtime({
+      sessionId: getSessionId(),
+      projectScopeId: resolve(currentCwd),
+      memoryDir: getAutoMemPath(),
+      dbPath: memoryV2DbPath,
+      gates: {
+        MEMORY_STORE_V2: memoryV2Requested,
+        MEMORY_HOT_SNAPSHOT: isEnvTruthy(process.env.NEOCODE_MEMORY_HOT_SNAPSHOT),
+        SKILL_STORE_V2: skillStoreRequested,
+        AUTO_SKILL_GENERATION: autoSkillGenerationRequested,
+        RETRIEVAL_COMPACTION: isEnvTruthy(process.env.NEOCODE_RETRIEVAL_COMPACTION),
+      },
+      generatedSkillOptions,
+      gateBlockers: skillGateBlockers,
+      rawCapsuleStore,
+      memoryPromptTransport: createMemoryPromptTransportQueue(),
+      sessionCryptoAvailable,
+      sessionCryptoDelete: sessionCryptoManager
+        ? () => sessionCryptoManager.deleteSession(getSessionId())
+        : undefined,
+      purgeEncryptedArtifacts: sessionCryptoManager
+        ? () => {
+            if (memoryV2DbPath === ':memory:') return;
+            for (const suffix of ['', '-wal', '-shm']) {
+              try { unlinkSync(`${memoryV2DbPath}${suffix}`) } catch {}
+            }
+          }
+        : undefined,
+    });
+    if (memoryV2Runtime) registerCleanup(() => memoryV2Runtime.close());
+    if (rawCapsuleWriter) registerCleanup(() => rawCapsuleWriter!.close());
+    if (memoryV2Requested && !worktreeEnabled) {
+      commandsPromise = getCommands(currentCwd);
+      agentDefsPromise = getAgentDefinitionsWithOverrides(currentCwd);
+      commandsPromise.catch(() => {});
+      agentDefsPromise.catch(() => {});
+    }
 
     // Replay user messages into stream-json only when the socket was
     // explicitly requested. The auto-generated socket is passive — it
@@ -1974,9 +2071,6 @@ async function run(): Promise<CommanderCommand> {
     const hasExplicitModelOverride = userSpecifiedModel !== undefined;
     const baseMainLoopModel = userSpecifiedModel ?? getUserSpecifiedModelSetting() ?? null;
 
-    // Reuse preSetupCwd unless setup() chdir'd (worktreeEnabled). Saves a
-    // getCwd() syscall in the common path.
-    const currentCwd = worktreeEnabled ? getCwd() : preSetupCwd;
     logForDebugging('[STARTUP] Loading commands and agents...');
     const commandsStart = Date.now();
     // Join the promises kicked before setup() (or start fresh if

@@ -45,6 +45,7 @@ import {
 } from './idePathConversion.js'
 import { sleep } from './sleep.js'
 import { jsonParse } from './slowOperations.js'
+import { z } from 'zod/v4'
 
 function isProcessRunning(pid: number): boolean {
   try {
@@ -834,6 +835,93 @@ export async function maybeNotifyIDEConnected(client: Client) {
     },
   })
 }
+
+// ----------------------------------------------------------------------------
+// mcp__ide__addToContext: server (JetBrains plugin) → client (Neocode CLI).
+//
+// The JetBrains "Add to Neocode Context" right-click editor action calls
+// MCPService.sendAddToContext() on the IDE side, which sends a JSON-RPC
+// notification to every connected MCP session with payload
+// `{ text, filePath?, language? }`.
+//
+// On the CLI side we register a notification handler that pushes the text
+// into a small in-memory FIFO (pendingIDEAdditions). The REPL drains it via
+// useAddToContext() and appends each entry to the active prompt input.
+// Notifications arriving while the user is mid-prompt are queued, not lost —
+// the next prompt composition will pick them up.
+//
+// We intentionally keep this off AppState: it's a transient buffer between
+// the IDE and the prompt input, never persisted.
+// ----------------------------------------------------------------------------
+
+export type IDEAdditionPayload = {
+  text: string
+  filePath?: string
+  language?: string
+  /** Server-supplied hint: true if the selection fits the current context window. */
+  fits?: boolean
+}
+
+const pendingIDEAdditions: IDEAdditionPayload[] = []
+
+export function enqueueIDEAddition(payload: IDEAdditionPayload): void {
+  pendingIDEAdditions.push(payload)
+}
+
+export function drainIDEAdditions(): IDEAdditionPayload[] {
+  if (pendingIDEAdditions.length === 0) return []
+  const out = pendingIDEAdditions.splice(0, pendingIDEAdditions.length)
+  return out
+}
+
+export function peekIDEAdditions(): readonly IDEAdditionPayload[] {
+  return pendingIDEAdditions
+}
+
+/**
+ * Register the `mcp__ide__addToContext` notification handler on a connected
+ * IDE client. Call once per (re)connection. Safe to call multiple times — the
+ * MCP SDK overwrites a previously-registered handler for the same schema.
+ */
+export function registerAddToContextHandler(client: Client): void {
+  // Inline schema: the MCP SDK dispatches by `method`, and we want to validate
+  // payload shape independently so a malformed IDE message is dropped, not
+  // thrown into our handler.
+  client.setNotificationHandler(
+    AddToContextNotificationSchema,
+    async (notification: AddToContextNotification) => {
+      const params = notification.params
+      if (!params || typeof params.text !== 'string') {
+        logForDebugging(
+          '[ide] addToContext notification missing/invalid params, dropping',
+        )
+        return
+      }
+      enqueueIDEAddition({
+        text: params.text,
+        filePath: params.filePath,
+        language: params.language,
+        fits: params.fits,
+      })
+      logEvent('tengu_mcp_ide_add_to_context_received', {
+        textLength: params.text.length,
+        fits: params.fits ?? true,
+      })
+    },
+  )
+}
+
+const AddToContextNotificationSchema = z.object({
+  method: z.literal('mcp__ide__addToContext'),
+  params: z.object({
+    text: z.string(),
+    filePath: z.string().optional(),
+    language: z.string().optional(),
+    fits: z.boolean().optional(),
+  }),
+})
+
+type AddToContextNotification = z.infer<typeof AddToContextNotificationSchema>
 
 export function hasAccessToIDEExtensionDiffFeature(
   mcpClients: MCPServerConnection[],

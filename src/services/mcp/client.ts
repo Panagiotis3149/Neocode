@@ -71,7 +71,11 @@ import {
   TelemetrySafeError_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
 } from '../../utils/errors.js'
 import { getMCPUserAgent } from '../../utils/http.js'
-import { maybeNotifyIDEConnected } from '../../utils/ide.js'
+import {
+  maybeNotifyIDEConnected,
+  registerAddToContextHandler,
+} from '../../utils/ide.js'
+import { registerIdeSessionHandlers } from '../../commands/ideSessionHandlers.js'
 import { maybeResizeAndDownsampleImageBuffer } from '../../utils/imageResizer.js'
 import { logMCPDebug, logMCPError } from '../../utils/log.js'
 import {
@@ -1226,6 +1230,8 @@ export const connectToServer = memoize(
         })
         try {
           void maybeNotifyIDEConnected(client)
+          registerAddToContextHandler(client)
+          registerIdeSessionHandlers(client)
         } catch (error) {
           logMCPError(
             name,

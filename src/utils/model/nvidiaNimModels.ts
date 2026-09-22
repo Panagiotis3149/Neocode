@@ -148,6 +148,7 @@ function getNvidiaNimModels(): ModelOption[] {
     { value: 'writer/palmyra-med-70b', label: 'Palmyra Med 70B', description: 'Other' },
     { value: 'writer/palmyra-med-70b-32k', label: 'Palmyra Med 70B 32K', description: 'Other' },
     // Z-AI GLM MODELS
+    { value: 'z-ai/glm-5.2', label: 'GLM-5.2', description: 'Z-AI' },
     { value: 'z-ai/glm-5.1', label: 'GLM-5.1', description: 'Z-AI' },
     { value: 'z-ai/glm5', label: 'GLM-5', description: 'Z-AI' },
     { value: 'z-ai/glm4.7', label: 'GLM-4.7', description: 'Z-AI' },

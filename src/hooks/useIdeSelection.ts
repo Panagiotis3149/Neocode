@@ -5,7 +5,7 @@ import type {
   ConnectedMCPServer,
   MCPServerConnection,
 } from '../services/mcp/types.js'
-import { getConnectedIdeClient } from '../utils/ide.js'
+import { drainIDEAdditions, getConnectedIdeClient } from '../utils/ide.js'
 import { lazySchema } from '../utils/lazySchema.js'
 export type SelectionPoint = {
   line: number
@@ -147,4 +147,52 @@ export function useIdeSelection(
 
     // No cleanup needed as MCP clients manage their own lifecycle
   }, [mcpClients, onSelect])
+}
+
+/**
+ * Drain the IDE addToContext FIFO queue and append each entry to the prompt input.
+ *
+ * The JetBrains right-click "Add to Neocode Context" action pushes payloads
+ * via MCP notification. They land in `pendingIDEAdditions` (see `registerAddToContextHandler`
+ * in `utils/ide.ts`). This hook drains the queue on an interval and:
+ *   - appends each entry's `text` to the active prompt input via `onAppend`
+ *   - emits a `notify` callback for any entry where the IDE signalled `fits: false`
+ *     (text exceeded the context window — user gets a heads-up)
+ *
+ * Polling instead of a direct subscription: notifications are delivered to the
+ * MCP client's notification handler (in `registerAddToContextHandler`), but the
+ * consumer here is the React prompt input. Bridging via a small in-memory queue
+ * + interval keeps the React tree out of the MCP notification hot path.
+ *
+ * No-op when no IDE client is connected.
+ */
+export function useAddToContext(
+  mcpClients: MCPServerConnection[],
+  onAppend: (text: string) => void,
+  notify?: (entry: { textLength: number; fits: boolean }) => void,
+): void {
+  // Track the current IDE client so we stop draining when the IDE disconnects.
+  // The queue is global; we don't need to clear it — undrained entries from a
+  // disconnected IDE will simply be picked up by the next connection.
+  const ideClient = getConnectedIdeClient(mcpClients)
+  const hasIDE = !!ideClient
+
+  useEffect(() => {
+    if (!hasIDE) return
+    const interval = setInterval(() => {
+      const drained = drainIDEAdditions()
+      if (drained.length === 0) return
+      for (const entry of drained) {
+        try {
+          onAppend(entry.text)
+          if (notify && entry.fits === false) {
+            notify({ textLength: entry.text.length, fits: false })
+          }
+        } catch (err) {
+          logError(err as Error)
+        }
+      }
+    }, 250)
+    return () => clearInterval(interval)
+  }, [hasIDE, onAppend, notify])
 }

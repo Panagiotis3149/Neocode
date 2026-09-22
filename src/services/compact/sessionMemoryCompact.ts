@@ -35,11 +35,15 @@ import {
 import {
   annotateBoundaryWithPreservedSegment,
   buildPostCompactMessages,
+  captureRawCompactionMessages,
   type CompactionResult,
   createPlanAttachmentIfNeeded,
 } from './compact.js'
 import { estimateMessageTokens } from './microCompact.js'
 import { getCompactUserSummaryMessage } from './prompt.js'
+import { persistRawCompactionCapsule } from './compact.js'
+import type { FeatureGateRequest } from '../memoryV2/featureGates.js'
+import type { EncryptedRawCapsuleStore, RawCapsuleDraft, SanitizedRawCompactionInput } from './rawCapsules.js'
 
 /**
  * Configuration for session memory compaction thresholds
@@ -58,6 +62,16 @@ export const DEFAULT_SM_COMPACT_CONFIG: SessionMemoryCompactConfig = {
   minTokens: 10_000,
   minTextBlockMessages: 5,
   maxTokens: 40_000,
+}
+
+export async function persistSessionMemoryRawCapsule(input: Readonly<{
+  store: EncryptedRawCapsuleStore
+  capsuleId: string
+  rawArtifactIds: readonly string[]
+  summarize: (input: SanitizedRawCompactionInput) => Promise<RawCapsuleDraft>
+  gates?: FeatureGateRequest
+}>) {
+  return persistRawCompactionCapsule(input)
 }
 
 // Current configuration (starts with defaults)
@@ -543,6 +557,7 @@ export async function trySessionMemoryCompaction(
   }
 
   try {
+    await captureRawCompactionMessages(messages)
     let lastSummarizedIndex: number
 
     if (lastSummarizedMessageId) {

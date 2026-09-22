@@ -1050,3 +1050,7 @@ export class BackupTokenManager {
     }
   }
 }
+
+export function isNvidiaNimRoute(providerName: string): boolean {
+  return providerName === 'nvidia-nim'
+}

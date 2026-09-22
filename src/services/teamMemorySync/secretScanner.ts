@@ -322,3 +322,39 @@ export function redactSecrets(content: string): string {
   }
   return content
 }
+
+export type SecretPlaceholder = Readonly<{
+  placeholder: string
+  ruleId: string
+}>
+
+export type SecretSanitization = Readonly<{
+  sanitized: string
+  placeholders: readonly SecretPlaceholder[]
+  containsOriginalSecret: (content: string) => boolean
+}>
+
+export function sanitizeSecretsWithPlaceholders(content: string): SecretSanitization {
+  const values: string[] = []
+  const placeholders: SecretPlaceholder[] = []
+  let sanitized = content
+
+  for (const rule of SECRET_RULES) {
+    const re = new RegExp(rule.source, `${rule.flags ?? ''}g`)
+    sanitized = sanitized.replace(re, (match: string, capture: unknown) => {
+      const value = typeof capture === 'string' && capture.length > 0 ? capture : match
+      const placeholder = `[REDACTED:${getSecretLabel(rule.id)}:${placeholders.length + 1}]`
+      values.push(value)
+      placeholders.push({ placeholder, ruleId: rule.id })
+      return typeof capture === 'string' && capture.length > 0
+        ? match.replace(capture, placeholder)
+        : placeholder
+    })
+  }
+
+  return Object.freeze({
+    sanitized,
+    placeholders: Object.freeze(placeholders),
+    containsOriginalSecret: (candidate: string) => values.some(value => value.length > 0 && candidate.includes(value)),
+  })
+}

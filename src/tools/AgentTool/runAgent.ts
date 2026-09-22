@@ -58,7 +58,12 @@ import { executeSubagentStartHooks } from '../../utils/hooks.js'
 import { createUserMessage } from '../../utils/messages.js'
 import { getAgentModel } from '../../utils/model/agent.js'
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js'
-import { resolveAgentRunModelRouting } from '../../services/api/agentRouting.js'
+import type { EffortValue } from '../../utils/effort.js'
+import {
+  resolveAgentProviderProfile,
+  resolveAgentRunModelRouting,
+} from '../../services/api/agentRouting.js'
+import type { ProviderOverride } from '../../services/api/agentRouting.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
 import {
   clearAgentTranscriptSubdir,
@@ -264,7 +269,12 @@ export async function* runAgent({
   description,
   transcriptSubdir,
   onQueryProgress,
+  onQueryMessage,
   agentName,
+  provider,
+  temperatureOverride,
+  effortValue,
+  subagentRuntime,
 }: {
   agentDefinition: AgentDefinition
   promptMessages: Message[]
@@ -324,8 +334,15 @@ export async function* runAgent({
    * during long single-block streams (e.g. thinking) where no assistant
    * message is yielded for >60s. */
   onQueryProgress?: () => void
+  onQueryMessage?: (message: unknown) => void
   /** Agent name (team member name) for routing resolution */
   agentName?: string
+  /** Provider profile id or display name. When resolvable, the profile's
+   * baseUrl/apiKey/model replace any settings-derived agentModels routing. */
+  provider?: string
+  temperatureOverride?: number
+  effortValue?: EffortValue
+  subagentRuntime?: ToolUseContext['subagentRuntime']
 }): AsyncGenerator<Message, void> {
   // Track subagent usage for feature discovery
 
@@ -347,21 +364,43 @@ export async function* runAgent({
   // Resolve per-agent provider routing from settings
   const settings = getInitialSettings()
 
-  const { mainLoopModel: effectiveModel, providerOverride } =
-    resolveAgentRunModelRouting({
-      resolvedAgentModel,
-      toolSpecifiedModel: model,
-      agentName,
-      subagentType: agentDefinition.agentType,
-      agentDefinitionModel: agentDefinition.model,
-      settings,
-    })
+  // Provider profile selection takes precedence: when the caller names a
+  // profile that resolves, its baseUrl/apiKey/model replace the
+  // settings-derived override entirely. An unresolvable selector warns and
+  // falls back to settings routing below.
+  let profileOverride: ProviderOverride | null = null
+  if (provider?.trim()) {
+    profileOverride = resolveAgentProviderProfile({ provider })
+    if (!profileOverride) {
+      const warnMessage = `[Subagent ${agentDefinition.agentType}] provider profile '${provider}' not found; falling back to settings routing`
+      logForDebugging(warnMessage, { level: 'warn' })
+      console.warn(warnMessage)
+    }
+  }
+
+  const {
+    mainLoopModel: settingsModel,
+    providerOverride,
+  } = resolveAgentRunModelRouting({
+    resolvedAgentModel,
+    toolSpecifiedModel: model,
+    agentName,
+    subagentType: agentDefinition.agentType,
+    agentDefinitionModel: agentDefinition.model,
+    settings,
+  })
+
+  // Profile model wins over the settings-resolved model when present.
+  const effectiveModel = profileOverride?.model ?? settingsModel
 
   if (providerOverride && !isModelAllowed(effectiveModel)) {
     throw new Error(
       `Model '${effectiveModel}' is not available. Your organization restricts model selection.`,
     )
   }
+
+  // Final override for the query: profile wins over settings-derived.
+  const finalProviderOverride = profileOverride ?? providerOverride
 
   const agentId = override?.agentId ? override.agentId : createAgentId()
 
@@ -463,6 +502,11 @@ export async function* runAgent({
         ...toolPermissionContext,
         shouldAvoidPermissionPrompts: true,
       }
+    } else if (canShowPermissionPrompts === true) {
+      toolPermissionContext = {
+        ...toolPermissionContext,
+        shouldAvoidPermissionPrompts: false,
+      }
     }
 
     // For background agents that can show prompts, await automated checks
@@ -494,10 +538,8 @@ export async function* runAgent({
     }
 
     // Override effort level if agent defines one
-    const effortValue =
-      agentDefinition.effort !== undefined
-        ? agentDefinition.effort
-        : state.effortValue
+    const resolvedEffortValue =
+      effortValue ?? agentDefinition.effort ?? state.effortValue
 
     const modelStateChanged =
       state.mainLoopModel !== effectiveModel ||
@@ -505,7 +547,7 @@ export async function* runAgent({
 
     if (
       toolPermissionContext === state.toolPermissionContext &&
-      effortValue === state.effortValue &&
+      resolvedEffortValue === state.effortValue &&
       !modelStateChanged
     ) {
       return state
@@ -515,13 +557,19 @@ export async function* runAgent({
       mainLoopModel: effectiveModel,
       mainLoopModelForSession: effectiveModel,
       toolPermissionContext,
-      effortValue,
+      effortValue: resolvedEffortValue,
     }
   }
 
   const resolvedTools = useExactTools
     ? availableTools
-    : resolveAgentTools(agentDefinition, availableTools, isAsync).resolvedTools
+    : resolveAgentTools(
+        agentDefinition,
+        availableTools,
+        isAsync,
+        false,
+        subagentRuntime !== undefined,
+      ).resolvedTools
 
   const additionalWorkingDirectories = Array.from(
     appState.toolPermissionContext.additionalWorkingDirectories.keys(),
@@ -698,7 +746,11 @@ export async function* runAgent({
     debug: toolUseContext.options.debug,
     verbose: toolUseContext.options.verbose,
     mainLoopModel: effectiveModel,
-    providerOverride: providerOverride ?? undefined,
+    providerOverride: finalProviderOverride ?? undefined,
+    temperatureOverride:
+      temperatureOverride ?? toolUseContext.options.temperatureOverride,
+    effortValue:
+      effortValue ?? agentDefinition.effort ?? toolUseContext.options.effortValue,
     // For fork children (useExactTools), inherit thinking config to match the
     // parent's API request prefix for prompt cache hits. For regular
     // sub-agents, disable thinking to control output token costs.
@@ -734,6 +786,7 @@ export async function* runAgent({
     criticalSystemReminder_EXPERIMENTAL:
       agentDefinition.criticalSystemReminder_EXPERIMENTAL,
     contentReplacementState,
+    subagentRuntime,
   })
 
   // Preserve tool use results for subagents with viewable transcripts (in-process teammates)
@@ -778,6 +831,7 @@ export async function* runAgent({
       querySource,
       maxTurns: maxTurns ?? agentDefinition.maxTurns,
     })) {
+      onQueryMessage?.(message)
       onQueryProgress?.()
       // Forward subagent API request starts to parent's metrics display
       // so TTFT/OTPS update during subagent execution.

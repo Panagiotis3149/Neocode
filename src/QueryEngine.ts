@@ -30,7 +30,10 @@ import {
   getTotalCost,
 } from './cost-tracker.js'
 import type { CanUseToolFn } from './hooks/useCanUseTool.js'
-import { loadMemoryPrompt } from './memdir/memdir.js'
+import {
+  loadMemoryPrompt,
+  registerMemoryPromptSystemPrompt,
+} from './memdir/memdir.js'
 import { hasAutoMemPathOverride } from './memdir/paths.js'
 import { query } from './query.js'
 import { categorizeRetryableAPIError } from './services/api/errors.js'
@@ -83,7 +86,10 @@ import {
   flushSessionStorage,
   recordTranscript,
 } from './utils/sessionStorage.js'
-import { asSystemPrompt } from './utils/systemPromptType.js'
+import {
+  asSystemPrompt,
+  inheritSystemPromptMetadata,
+} from './utils/systemPromptType.js'
 import { resolveThemeSetting } from './utils/systemTheme.js'
 import {
   shouldEnableThinkingByDefault,
@@ -322,11 +328,16 @@ export class QueryEngine {
         ? await loadMemoryPrompt()
         : null
 
-    const systemPrompt = asSystemPrompt([
+    const systemPrompt = registerMemoryPromptSystemPrompt(
+      inheritSystemPromptMetadata(
+        asSystemPrompt([
       ...(customPrompt !== undefined ? [customPrompt] : defaultSystemPrompt),
       ...(memoryMechanicsPrompt ? [memoryMechanicsPrompt] : []),
       ...(appendSystemPrompt ? [appendSystemPrompt] : []),
-    ])
+        ]),
+        defaultSystemPrompt,
+      ),
+    )
 
     // Register function hook for structured output enforcement
     const hasStructuredOutputTool = tools.some(t =>

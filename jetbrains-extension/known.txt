@@ -1,0 +1,149 @@
+DiffTools.kt:
+
+
+```text
+Package ...
+
+import ...
+
+53: @Serializable
+54: data class OpenDiffToolArgs(
+55:     val old_file_path: String,
+56:     val new_file_path: String,
+57:     val new_file_contents: String,
+58:     val tab_name: String
+59: )
+60:
+61: object DiffTools {
+62:     fun addTools(mcpServer: Server, mcpService: MCPService) {
+63:         mcpServer.addTool(
+64:             name = "openDiff",
+65:             description = "opens a diff in the IDE",
+66:             inputSchema = argsClassToToolInputSchema(OpenDiffToolArgs::class)
+67:         ) { callToolRequest ->
+68:             val result = CompletableDeferred<CallToolResult>()
+69:
+70:             val project = getLastFocusedOpenedProject()
+71:             val projectDir = project?.guessProjectDir().toPathOrNull()
+72:             if (project == null || projectDir == null) {
+73:                 result.complete(CallToolResult(content = listOf(TextContent(text: "No active projec
+74:             } else {
+75:                 val fileDocumentManager = FileDocumentManager.getInstance()
+76:                 val fileTypeManager = FileTypeManager.getInstance()
+77:                 val contentFactory = DiffContentFactory.getInstance()
+78:                 ApplicationManager.getApplication().invokeAndWait {
+79:                     try {
+80:                         val args = Json.decodeFromJsonElement<OpenDiffToolArgs>(callToolRequest.a
+81:
+82:                         val originalFile = openVirtualFileFromPath(args.old_file_path, projectDir
+83:                         val originalFileName = args.old_file_path.substringAfterLast(delimiter:
+84:                         val originalFileType = originalFile.fileType
+85:                         val newFileType = originalFile.fileType
+86:                         if (newFileType == FileTypes.UNKNOWN) null else this
+87:
+88:                         val oldFileContents
+89:                         val originalFilter: Text
+```
+
+DiffTools (more context?)
+
+```text
+61: object DiffTools {
+62:     fun addTools(mcpServer: Server, mcpService: MCPService) {
+63:         mcpServer.addTool(
+64:             name = "openDiff",
+65:             description = "opens a diff in the IDE",
+66:             inputSchema = argsClassToToolInputSchema(OpenDiffToolArgs::class)
+67:         ) { callToolRequest ->
+68:             val result = CompletableDeferred<CallToolResult>()
+69:
+70:             val project = getLastFocusedOpenedProject()
+71:             val projectDir = project?.guessProjectDir().toPathOrNull()
+72:             if (project == null || projectDir == null) {
+73:                 result.complete(CallToolResult(content = listOf(TextContent(text = "No active project"))))
+74:             } else {
+75:                 val fileDocumentManager = FileDocumentManager.getInstance()
+76:                 val fileTypeManager = FileTypeManager.getInstance()
+77:                 val contentFactory = DiffContentFactory.getInstance()
+78:                 ApplicationManager.getApplication().invokeAndWait {
+79:                     try {
+80:                         val args = Json.decodeFromJsonElement<OpenDiffToolArgs>(callToolRequest.arguments!!)
+81:
+82:                         val originalFile = openVirtualFileFromPath(args.old_file_path, projectDir)
+83:                         val originalFileName = args.old_file_path.substringAfterLast(delimiter = "/")
+84:                         val originalFileType = originalFile.fileType
+85:
+86:                         val proposedFileContents = args.new_file_contents
+87:                         val proposedEditFile = openVirtualFileFromPath(args.new_file_path, projectDir)
+88:                         val proposedFileName = args.new_file_path.substringAfterLast(delimiter = "/")
+89:                         val proposedFileType = proposedEditFile.fileType
+90:
+91:                         val originalContent = fileDocumentManager.getDocument(originalFile)?.text ?: ""
+92:                         val originalFileContent = contentFactory.create(project, originalContent, originalFileType)
+93:
+94:                         val proposedDiffFileContents = args.new_file_contents
+95:                         val proposedDiffFileName = args.tab_name
+96:                         val proposedDiffFileContent = contentFactory.create(project, proposedDiffFileContents, proposedFileType)
+97:                         val proposedDiffFileNameContent = contentFactory.create(project, proposedDiffFileName, proposedFileType)
+98:                         val proposedDiffFileTextContent = contentFactory.create(project, proposedDiffFileContents, proposedFileType)
+99:
+100:                         val originalTitlePrefix = "Source: "
+101:                         val newTitlePrefix = "Target: "
+102:                         val cfRequest = SimpleDiffRequest(
+103:                             args.tab_name,
+104:                             proposedDiffFileContent,
+105:                             originalFileContent,
+106:                             proposedDiffFileNameContent,
+107:                             originalFileContent
+108:                         )
+109:
+110:                         val ready = BooleanArray(1)
+111:                         ready[0] = false
+112:                         FutureUtil.waitFor(
+113:                             if (request.is)
+114:                             app = null
+115:                             if (actionNotified == false) {
+116:                                 actionNotified = true
+117:                                 ApplicationManager.getApplication().invokeLater {
+118:                                     val updateText = "Open diff in ${project.name}"
+119:                                     callToolResult
+120: ```
+
+Also DiffTools?
+75:                 val fileDocumentManager = FileDocumentManager.getInstance()
+76:                 val fileTypeManager = FileTypeManager.getInstance()
+77:                 val contentFactory = DiffContentFactory.getInstance()
+78:                 ApplicationManager.getApplication().invokeAndWait {
+79:                     try {
+80:                         val args = Json.decodeFromJsonElement<OpenDiffToolArgs>(callToolRequest.arguments!!)
+81:
+82:                         val originalFile = openVirtualFileFromPath(args.old_file_path, projectDir)
+83:                         val originalFileName = args.old_file_path.substringAfterLast('/')
+84:                         val originalFileType = originalFile?.fileType
+85:                             ?: fileTypeManager.getFileTypeByFileName(originalFileName).run {
+86:                                 if (this == FileTypes.UNKNOWN) null else this
+87:                             }
+88:
+89:                         val oldFileContents =
+90:                             originalFile?.let { fileDocumentManager.getDocument(it)?.text } ?: ""
+91:                         val originalDocumentContent = contentFactory.create(project, oldFileC
+92:
+93:                         val proposedFileContents = args.new_file_contents
+94:                         val proposedEditFile =
+95:                             LightVirtualFile(originalFileName, originalFileType, proposedFileC
+96:                         val proposedEditableDocument =
+97:                             contentFactory.createDocument(project, prop
+98:
+99:                         val originalTitlePrefix = if (originalFile != null) "Original: " else
+100:                         val diffRequest = SimpleDiffRequest(
+101:                             args.tab_name,
+102:                             originalDocumentContent,
+103:                             proposedEditableDiffContent,
+104:                             "$originalTitlePrefix${args.old_file_path}",
+105:                             "Proposed",
+106:                         )
+107:
+108:                         val diffRequestChain = SimpleDiffRequestChain(diffRequest)
+109: ```
+
+

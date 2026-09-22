@@ -135,9 +135,16 @@ function getConfiguredProfileModelOptionsForTest(profile: {
     }))
 }
 
-function mockProviderProfiles(
+async function mockProviderProfiles(
   overrides: Partial<typeof import('../../utils/providerProfiles.js')> = {},
-): void {
+): Promise<void> {
+  // Capture the REAL module outside the sync mock factory so the factory can
+  // spread it. bun's mock.module() is sticky per worker process; spreading
+  // actuals keeps exports added later (e.g. findProviderProfileByIdOrName)
+  // available to other suites sharing this worker.
+  const actualProviderProfiles = (await import(
+    `../../utils/providerProfiles.ts?modelCommandProfilesActual=${Date.now()}-${Math.random()}`
+  )) as typeof import('../../utils/providerProfiles.js')
   const providerProfilesMock = {
     addProviderProfile: () => null,
     applyActiveProviderProfileFromConfig: () => undefined,
@@ -180,6 +187,7 @@ function mockProviderProfiles(
   } satisfies Partial<typeof import('../../utils/providerProfiles.js')>
 
   mock.module('../../utils/providerProfiles.js', () => ({
+    ...actualProviderProfiles,
     ...providerProfilesMock,
     ...overrides,
   }))
@@ -450,7 +458,7 @@ test('opens the model picker without awaiting descriptor-backed route refresh', 
     ),
   }))
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [],
     getActiveProviderProfile: () => undefined,
     getProfileModelOptions: () => [],
@@ -517,7 +525,7 @@ test('descriptor model options include active profile configured models', async 
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [],
     getActiveProviderProfile: () => activeProfile,
     getProfileModelOptions: () => [
@@ -575,7 +583,7 @@ test('descriptor model options omit route defaults outside active profile models
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [],
     getActiveProviderProfile: () => activeProfile,
     getProfileModelOptions: () => [
@@ -638,7 +646,7 @@ test('descriptor model options preserve discovered route models for discovery-ba
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [],
     getActiveProviderProfile: () => activeProfile,
     getProfileModelOptions: () => [
@@ -707,7 +715,7 @@ test('native vendor routes show the full catalog regardless of the profile model
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
     getProfileModelOptions: () =>
       getConfiguredProfileModelOptionsForTest(activeProfile),
@@ -740,7 +748,7 @@ test('auto profile model picker mode uses explicit multi-model profiles as the p
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
     getProfileModelOptions: () => [
       ...getConfiguredProfileModelOptionsForTest(activeProfile),
@@ -799,7 +807,7 @@ test('provider profile model picker surface keeps static route catalogs for sing
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
     getProfileModelOptions: () =>
       getConfiguredProfileModelOptionsForTest(activeProfile),
@@ -852,7 +860,7 @@ test('provider profile model picker surface keeps discovered catalogs and append
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
     getProfileModelOptions: () =>
       getConfiguredProfileModelOptionsForTest(activeProfile),
@@ -960,7 +968,7 @@ test('provider profile model picker mode override keeps catalog first for multi-
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
   })
 
@@ -1066,7 +1074,7 @@ test('/model applies providerProfileModelPickerMode profile override on descript
     })),
     probeRouteReadiness: mock(async () => null),
   }))
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
   })
 
@@ -1140,7 +1148,7 @@ test('/model applies auto profile surface for multi-model descriptor profiles', 
       { id: 'other-model', apiName: 'openai/gpt-5' },
     ],
   })
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
   })
 
@@ -1197,7 +1205,7 @@ test('/model applies auto provider surface for single-model descriptor profiles'
       { id: 'other-model', apiName: 'openai/gpt-5' },
     ],
   })
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
   })
 
@@ -1256,7 +1264,7 @@ test('/model applies auto provider surface for single-model static descriptor pr
   delete process.env.CLAUDE_CODE_USE_FOUNDRY
   delete process.env.OPENAI_API_BASE
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
   })
 
@@ -1318,7 +1326,7 @@ test('/model applies providerProfileModelPickerMode provider override on descrip
       { id: 'other-model', apiName: 'openai/gpt-5' },
     ],
   })
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
   })
 
@@ -1402,7 +1410,7 @@ test('/model applies profile surface to legacy local OpenAI-compatible profiles'
       description: 'Discovered from API',
     },
   ])
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [
       {
         value: 'local-model-a',
@@ -1474,7 +1482,7 @@ test('/model legacy local OpenAI route ignores inactive saved profile cache', as
       description: 'Detected from route',
     },
   ])
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [
       {
         value: 'saved-profile-model',
@@ -1535,7 +1543,7 @@ test('/model legacy local OpenAI route filters scoped cache by availableModels',
       description: 'Detected from route',
     },
   ])
-  mockProviderProfiles()
+  await mockProviderProfiles()
 
   const rendered = await renderModelCommandWithCapturedPicker(
     'legacy-openai-allowlist-initial',
@@ -1592,7 +1600,7 @@ test('/model legacy local OpenAI refresh does not write inactive profile cache',
   const setActiveOpenAIModelOptionsCache = mock(() => {
     throw new Error('inactive profile cache must not be written')
   })
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [
       {
         value: 'saved-profile-model',
@@ -1688,7 +1696,7 @@ test('/model legacy local OpenAI refresh compares allowlist-filtered options', a
       description: 'Detected from route',
     },
   ])
-  mockProviderProfiles()
+  await mockProviderProfiles()
   mock.module('../../utils/model/openaiModelDiscovery.js', () => ({
     discoverOpenAICompatibleModelOptions: mock(async () => [
       {
@@ -1773,7 +1781,7 @@ test('/model legacy local OpenAI refresh preserves cached options when discovery
     },
   ]
   const scopedCache = await mockScopedLocalOpenAIModelCache(cachedOptions)
-  mockProviderProfiles()
+  await mockProviderProfiles()
   mock.module('../../utils/model/openaiModelDiscovery.js', () => ({
     discoverOpenAICompatibleModelOptions: mock(async () => []),
   }))
@@ -1860,7 +1868,7 @@ test('/model legacy local OpenAI refresh preserves cached provider options for a
     },
   ]
   const scopedCache = await mockScopedLocalOpenAIModelCache(cachedOptions)
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [
       {
         value: 'profile-only-model',
@@ -1967,7 +1975,7 @@ test('/model legacy provider mode keeps raw local cache before profile-only mode
       description: 'Detected from route',
     },
   ])
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [
       {
         value: 'profile-only-model',
@@ -2028,7 +2036,7 @@ test('descriptor model options filter route and profile-only entries by availabl
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
     getProfileModelOptions: () =>
       getConfiguredProfileModelOptionsForTest(activeProfile),
@@ -2076,7 +2084,7 @@ test('descriptor model options skip saved profile models for env-selected routes
   delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED
   delete process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [],
     getActiveProviderProfile: () => savedProfile,
     getProfileModelOptions: () => [
@@ -2124,7 +2132,7 @@ test('descriptor model options ignore active profile when applied profile id doe
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = 'other-profile'
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
   })
 
@@ -2164,7 +2172,7 @@ test('descriptor model options ignore active profile when route does not match',
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED = '1'
   process.env.CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID = activeProfile.id
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
   })
 
@@ -2244,7 +2252,7 @@ test('/model refresh clears descriptor cache and reports updates', async () => {
     probeRouteReadiness: mock(async () => null),
   }))
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [],
     getActiveProviderProfile: () => undefined,
     getProfileModelOptions: () => [],
@@ -2329,7 +2337,7 @@ test('/model refresh reports discovered model changes for dynamic active profile
     probeRouteReadiness: mock(async () => null),
   }))
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [],
     getActiveProviderProfile: () => activeProfile,
     getProfileModelOptions: () => [
@@ -2404,7 +2412,7 @@ test('/model refresh compares already allowlist-filtered descriptor options', as
     probeRouteReadiness: mock(async () => null),
   }))
 
-  mockProviderProfiles()
+  await mockProviderProfiles()
 
   const messages: string[] = []
   const { call } = await importFreshModelModule(
@@ -2447,7 +2455,7 @@ test('/model refresh treats empty legacy OpenAI-compatible discovery as failed n
     },
   ]
   const scopedCache = await mockScopedLocalOpenAIModelCache(cachedOptions)
-  mockProviderProfiles()
+  await mockProviderProfiles()
   mock.module('../../utils/model/openaiModelDiscovery.js', () => ({
     discoverOpenAICompatibleModelOptions: mock(async () => []),
   }))
@@ -2506,7 +2514,7 @@ test('interactive model picker refresh keeps descriptor options allowlist-filter
       { id: 'blocked', apiName: 'blocked-route' },
     ],
   })
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveProviderProfile: () => activeProfile,
   })
 
@@ -2547,7 +2555,7 @@ test('interactive model picker refresh keeps descriptor options allowlist-filter
 test('interactive model picker rejects models blocked by availableModels before updating state', async () => {
   useSettings({ availableModels: ['allowed-model'] } as SettingsJson)
 
-  mockProviderProfiles()
+  await mockProviderProfiles()
   mock.module('../../components/ModelPicker.js', () => ({
     ModelPicker: function MockModelPicker(props: {
       onSelect: (model: string | null, effort: undefined) => void
@@ -2649,7 +2657,7 @@ test('/model does not auto-refresh descriptor models when nonessential traffic i
     discoverModelsForRoute,
   }))
 
-  mockProviderProfiles({
+  await mockProviderProfiles({
     getActiveOpenAIModelOptionsCache: () => [],
     getActiveProviderProfile: () => undefined,
     getProfileModelOptions: () => [],

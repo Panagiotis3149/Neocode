@@ -25,6 +25,9 @@ export const COMMON_EXTERNALS: string[] = [
   // Orama search engine
   '@orama/orama',
   '@orama/plugin-data-persistence',
+  // TUI framework (React-based, kept external to avoid bundling React)
+  'ink',
+  'react-devtools-core',
 ]
 
 // Additional packages external only in the SDK bundle (TUI + heavy deps)
@@ -74,6 +77,8 @@ export const INTENTIONALLY_BUNDLED: string[] = [
   'get-east-asian-width',
   'indent-string',
   'supports-hyperlinks',
+  // OS recycle-bin move (single-purpose, small)
+  'trash',
   'wrap-ansi',
   // Data formats
   'jsonc-parser',

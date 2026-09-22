@@ -6,6 +6,7 @@ import btw from './commands/btw/index.js'
 import goodClaude from './commands/good-claude/index.js'
 import issue from './commands/issue/index.js'
 import feedback from './commands/feedback/index.js'
+import forget from './commands/forget/index.js'
 import clear from './commands/clear/index.js'
 import color from './commands/color/index.js'
 import commit from './commands/commit.js'
@@ -196,6 +197,7 @@ import rateLimitOptions from './commands/rate-limit-options/index.js'
 import statusline from './commands/statusline.js'
 import effort from './commands/effort/index.js'
 import autonomous from './commands/autonomous/index.js'
+import goal from './commands/goal/index.js'
 import stats from './commands/stats/index.js'
 // insights.ts is 113KB (3200 lines, includes diffLines/html rendering). Lazy
 // shim defers the heavy module until /insights is actually invoked.
@@ -294,6 +296,7 @@ const COMMANDS = memoize((): Command[] => [
   doctor,
   effort,
   autonomous,
+  goal,
   exit,
   fast,
   files,
@@ -332,6 +335,7 @@ const COMMANDS = memoize((): Command[] => [
   theme,
   logo,
   feedback,
+  forget,
   review,
   ultrareview,
   rewind,

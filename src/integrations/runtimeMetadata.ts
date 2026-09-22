@@ -22,7 +22,7 @@ import {
 function normalizeModelApiName(
   value: string | undefined,
 ): string | null {
-  const trimmed = value?.trim().toLowerCase()
+  const trimmed = value?.trim().toLowerCase().split('?')[0]
   return trimmed ? trimmed : null
 }
 

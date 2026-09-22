@@ -90,6 +90,60 @@ test('normal subagent prompt metadata uses routed effective model', async () => 
   )
 })
 
+test('Subagents V2 delegates identity and model overrides to the supervisor', async () => {
+  const { AgentTool } = await importAgentToolWithRoutingMocks()
+  const spawned: Array<Record<string, unknown>> = []
+  const supervisor = {
+    spawn: mock(async (params: Record<string, unknown>) => {
+      spawned.push(params)
+      return {
+        agentId: 'subagent-1',
+        agentName: 'researcher',
+        done: Promise.resolve(),
+        result: Promise.resolve([]),
+      }
+    }),
+  }
+  const context = createToolUseContext(
+    'parent-model',
+    [createAgentDefinition()],
+  )
+  context.subagentSupervisor = supervisor as never
+
+  const result = await AgentTool.call(
+    {
+      description: 'Research the protocol',
+      prompt: 'Trace the protocol flow',
+      subagent_type: 'general-purpose',
+      subagent_name: 'researcher',
+      model_overrides: {
+        model: 'gpt-5.5',
+        provider: 'local-profile',
+        temperature: 0.2,
+        reasoning_effort: 'high',
+      },
+      verbosity: 'outputs_and_calls',
+      mode: 'async',
+      lookup_benchmarks: true,
+    },
+    context,
+    mock(async () => ({ behavior: 'allow' })) as never,
+    { requestId: 'req-v2' } as never,
+  )
+
+  expect(result.data.status).toBe('async_launched')
+  expect(spawned).toHaveLength(1)
+  expect(spawned[0]?.agentName).toBe('researcher')
+  expect(spawned[0]?.modelOverrides).toEqual({
+    model: 'gpt-5.5',
+    provider: 'local-profile',
+    temperature: 0.2,
+    reasoning_effort: 'high',
+  })
+  expect(spawned[0]?.verbosity).toBe('outputs_and_calls')
+  expect(spawned[0]?.lookup_benchmarks).toBe(true)
+})
+
 async function importAgentToolWithRoutingMocks(): Promise<{
   AgentTool: AgentToolModule['AgentTool']
   promptModels: string[]

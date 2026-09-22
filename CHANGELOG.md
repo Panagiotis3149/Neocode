@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.19.0 - 2026-09-22
+
+### Added
+
+- Subagents V2 supervision with sync and async execution, named workers, event streaming, message routing, provider/model overrides, verbosity controls, and optional benchmark metadata.
+- Memory V2 storage and runtime integration with prompt fencing, encrypted session artifacts, raw compaction capsules, generated-skill configuration, and `/forget` and `/goal` command support.
+- Additional provider profiles, model metadata, NVIDIA NIM reasoning formats, Nemotron models, effort overrides, and agent provider routing.
+- IDE session handling, worktree path validation, session persistence improvements, and safer worktree lifecycle behavior.
+
+### Changed
+
+- Strengthened secret scanning, sandbox/worktree safety, session restore, compaction, memory extraction, and permission handling.
+- Improved spinner and buddy rendering, model/session command flows, context-window controls, and skill-improvement feedback.
+- Added focused coverage for routing, security hardening, memory, session crypto, worktrees, permissions, and Subagents V2 behavior.
+
+### Removed
+
+- Removed the obsolete `pr1869.diff` patch artifact.
+
 All notable changes to Neocode are documented in this file. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 

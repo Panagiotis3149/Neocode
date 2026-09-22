@@ -10,6 +10,7 @@ import {
   SPECIES,
   STAT_NAMES,
   type StatName,
+  capybara,
 } from './types.js'
 
 // Mulberry32 — tiny seeded PRNG, good enough for picking ducks
@@ -56,6 +57,7 @@ const RARITY_FLOOR: Record<Rarity, number> = {
   rare: 25,
   epic: 35,
   legendary: 50,
+  custom: 0,
 }
 
 // One peak stat, one dump stat, rest scattered. Rarity bumps the floor.
@@ -107,6 +109,34 @@ let rollCache: { key: string; value: Roll } | undefined
 export function roll(userId: string): Roll {
   const key = userId + SALT
   if (rollCache?.key === key) return rollCache.value
+
+  // userId-bound custom buddy for the dev
+  if (
+    userId === '64c1383f844986ec20a5adfaddd0d3c38e56a30feb7406e8aa732a0f6102a426'
+  ) {
+    const value: Roll = {
+      bones: {
+        rarity: 'custom',
+        species: capybara,
+        eye: '·',
+        hat: 'none',
+        shiny: false,
+        stats: {
+          DEBUGGING: 85,
+          PATIENCE: 5,
+          CHAOS: 65,
+          WISDOM: 10,
+          SNARK: 95,
+        },
+      },
+      inspirationSeed: Math.floor(
+        mulberry32(hashString(key))() * 1e9,
+      ),
+    }
+    rollCache = { key, value }
+    return value
+  }
+
   const value = rollFrom(mulberry32(hashString(key)))
   rollCache = { key, value }
   return value

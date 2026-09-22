@@ -23,9 +23,10 @@ shared context via inter-agent dialogue.
 1. **Real-time streaming**: When the main model spawns a subagent, the user sees the subagent's
    tool calls and (optionally) text output stream into the main conversation with a `[Subagent: name]`
    badge. Verbosity is configurable per-spawn.
-2. **Model selection**: Main model can override model, temperature, and reasoning effort per subagent.
-   Defaults inherit from the main model's config. Benchmarks (parameter count, context window,
-   pricing) are queryable from Hugging Face / Artificial Analysis to inform model choice.
+2. **Model selection**: Main model can override model, temperature, reasoning effort, **and provider
+   profile** per subagent. Defaults inherit from the main model's config. Benchmarks (parameter
+   count, context window, pricing) are queryable from Hugging Face / Artificial Analysis to inform
+   model choice.
 3. **Permission forwarding**: When a subagent requests permission for a tool, the user sees the
    request inline in the main conversation with the subagent name, and approves/denies as if the
    main model had asked. The subagent blocks until a response is received.
@@ -80,8 +81,17 @@ class SubagentSupervisor {
 Wraps a `runAgent()` invocation with supervisor-aware configuration:
 
 - **Model config**: fully resolved at spawn via
-  `resolveAgentRunModelRouting({ agentDefinition: { model, temperature, reasoning_effort }, ... })`.
+  `resolveAgentRunModelRouting({ agentDefinition: { model, temperature, reasoning_effort, provider }, ... })`.
   Inheritance: if any field is omitted, it inherits from the main model's resolved config.
+- **Provider selection**: the orchestrator may additionally request a **provider profile** to route
+  the subagent's model through, not just a model id. The override field is
+  `provider` (a provider-profile id, or its `name`). At spawn the supervisor resolves the named
+  profile from `getProviderProfiles()` into a `ProviderOverride` (`baseURL` + `apiKey` from the
+  profile's `baseUrl`/`apiKey`, `model` from the profile's `model`), and passes it to the subagent's
+  `runAgent()` request so the subagent's API calls go through that provider regardless of the global
+  active profile. Unresolvable profile → warn and fall back to inherited/global routing (mirrors
+  `agentModels` override behavior). This is independent of — and takes precedence over — the
+  `agentModels`-derived override in `resolveAgentRunModelRouting`.
 - **Verbosity**: `"outputs_and_calls" | "calls_only" | "none"` — controls which event types the
   supervisor forwards to subscribers.
 - **Permission hook**: a custom callback injected into the subagent's app state that, instead of
@@ -127,6 +137,8 @@ The existing `AgentTool` input schema is extended:
   subagent_name?: string                  // required, used as display name + addressing
   model_overrides?: {                     // all optional; inherit from main model if omitted
     model?: string
+    provider?: string                     // provider-profile id or display name; routes the model
+                                          // through that profile's baseURL+apiKey at spawn
     temperature?: number
     reasoning_effort?: "low" | "medium" | "high"
   }

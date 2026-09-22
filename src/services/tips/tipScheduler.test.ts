@@ -21,13 +21,26 @@ const relevantTipsRef: { value: Tip[] } = { value: [] }
 
 await acquireSharedMutationLock('services/tips/tipScheduler.test.ts')
 
+// bun's mock.module() is sticky for the whole worker process. Spread the REAL
+// modules into these factories (via cache-busted dynamic imports) so other
+// suites sharing this worker keep working when their code resolves new named
+// exports against these mocked specifiers.
+const actualSettings = await import(
+  `../../utils/settings/settings.js?ts=${Date.now()}-${Math.random()}`
+)
+const actualConfig = await import(
+  `../../utils/config.js?ts=${Date.now()}-${Math.random()}`
+)
+
 mock.module('../../utils/settings/settings.js', () => ({
+  ...actualSettings,
   getSettings_DEPRECATED: () => settingsRef.value,
   getInitialSettings: () => settingsRef.value,
   getSettingsForSource: () => undefined,
 }))
 
 mock.module('../../utils/config.js', () => ({
+  ...actualConfig,
   getGlobalConfig: () => configRef.value,
   saveGlobalConfig: (mut: (c: typeof configRef.value) => typeof configRef.value) => {
     configRef.value = mut(configRef.value)
